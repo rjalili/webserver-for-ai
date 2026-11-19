@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Chat</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header id="bar">
+    <div id="where">
+      <div id="title">AI Chat</div>
+      <div id="url"></div>
+    </div>
+    <div id="controls">
+      <label title="Restart the chat whenever you browse to another page"><input type="checkbox" id="follow" checked> Follow tab</label>
+      <button id="show" title="Show the current chat page in the browser tab (hybrid view)">Show in tab</button>
+    </div>
+  </header>
+
+  <main id="log" aria-live="polite"></main>
+
+  <form id="ask">
+    <input id="q" autocomplete="off" placeholder="Ask this site anything…" aria-label="Ask this site">
+    <button type="submit">Send</button>
+  </form>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

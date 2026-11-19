@@ -1,0 +1,1 @@
+<?php session_start(); if (!isset($_SESSION["user"])) { echo "<html><title>VIP</title><h1>Please log in</h1>"; exit; } ?><h1>VIP prices</h1>

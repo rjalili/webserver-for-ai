@@ -1,0 +1,38 @@
+# 21 code files read; 35 URLs or URL patterns found, 23 require login.
+# Format: STATUS  URL  [source] evidence.   '/x/*' = everything under /x.  (browser) = guard runs in the browser.
+
+LOGIN-REQUIRED  /admin/index.php  [php] admin/index.php:1: calls login guard require_admin() [lib/functions.php:3: function require_admin() checks for a logged-in user and redirects/stops otherwise]
+LOGIN-REQUIRED  /admin/  [php] admin/index.php:1: calls login guard require_admin() [lib/functions.php:3: function require_admin() checks for a logged-in user and redirects/stops otherwise]
+LOGIN-REQUIRED  /vip.php  [php] vip.php:1: checks for a logged-in user and redirects/stops otherwise
+LOGIN-REQUIRED  /members/*  [htaccess] members/.htaccess: AuthType with Require (HTTP login)
+LOGIN-REQUIRED  /account.php  [php] account.php: includes includes/auth.php [includes/auth.php:3: checks for a logged-in user and redirects/stops otherwise]
+LOGIN-REQUIRED  /orders.php  [php] orders.php:2: calls login guard must_login() [lib/functions.php:5: function must_login() calls require_admin()]
+LOGIN-PAGE      /login.php  [php] login.php: has a password field and no login check
+PUBLIC          /products.php  [php] products.php: no login check found
+LOGIN-REQUIRED  /profile.php  [php] profile.php:1: calls auth_redirect()
+PUBLIC          /news.php  [php] news.php: no login check found
+LOGIN-REQUIRED  /app/account/*  [express] server.js:8: router mounted at '/account' uses middleware requireLogin
+LOGIN-REQUIRED  /app/dashboard  [express] server.js:10: app.get('/dashboard') uses middleware ensureLoggedIn
+PUBLIC          /app/health  [express] server.js:11: app.get('/health') has no auth middleware
+LOGIN-REQUIRED  /app/inbox  [express] server.js:12: app.get('/inbox') the handler checks req.session/req.user and refuses or redirects otherwise
+LOGIN-REQUIRED  /app/account/orders  [express] routes/account.js:2: router.get('/orders') mounted with middleware in server.js:8 (uses middleware requireLogin)
+LOGIN-REQUIRED  /app/account/settings  [express] routes/account.js:3: router.get('/settings') mounted with middleware in server.js:8 (uses middleware requireLogin)
+PUBLIC          /app/pricing  [express] routes/public.js:3: router.get('/pricing') has no auth middleware
+LOGIN-REQUIRED  /app/reports  [express] routes/public.js:5: router.get('/reports') router.use(...) at line 4 (uses middleware authenticate)
+LOGIN-REQUIRED  /spa/team/*  [nextjs] middleware.ts: Next.js middleware matcher '/team' with an auth check
+LOGIN-REQUIRED  /spa/billing-portal  [nextjs] middleware.ts: Next.js middleware matcher '/billing-portal' with an auth check
+PUBLIC          /spa  [react, browser] src/App.jsx:5: client route without a login guard
+PUBLIC          /spa/login  [react, browser] src/App.jsx:6: client route without a login guard
+LOGIN-REQUIRED  /spa/profile  [react, browser] src/App.jsx:8: nested inside a guarded layout route
+LOGIN-REQUIRED  /spa/billing  [react, browser] src/App.jsx:9: nested inside a guarded layout route
+LOGIN-REQUIRED  /spa/settings  [react, browser] src/App.jsx:11: route element is wrapped in a login guard component
+PUBLIC          /spa/faq  [react, browser] src/App.jsx:12: client route without a login guard
+PUBLIC          /spa/about  [vue/angular/react, browser] src/router/index.js:3: client route without a login guard
+LOGIN-REQUIRED  /spa/user/:id  [vue/angular/react, browser] src/router/index.js:4: route marked as requiring login (requiresAuth/canActivate/guard)
+LOGIN-REQUIRED  /spa/user/:id/edit  [vue/angular/react, browser] src/router/index.js:5: child of a route that requires login
+PUBLIC          /spa/help  [vue/angular/react, browser] src/router/index.js:6: client route without a login guard
+PUBLIC          /  [laravel] routes/web.php:3: Laravel route without auth middleware
+PUBLIC          /shop/catalogue  [laravel] routes/web.php:4: Laravel route without auth middleware
+LOGIN-REQUIRED  /shop/basket  [laravel] routes/web.php:5: route has auth middleware
+LOGIN-REQUIRED  /member/invoices  [laravel] routes/web.php:7: inside a Route group with auth middleware (line 6)
+LOGIN-REQUIRED  /member/invoices/{id}  [laravel] routes/web.php:8: inside a Route group with auth middleware (line 6)

@@ -1,0 +1,7 @@
+SPDX-License-Identifier: Apache-2.0
+
+The source code header of mod_ai_agent states the Apache License, Version 2.0.
+
+ACTION FOR THE PROJECT OWNER before publishing: confirm this licence choice, then replace
+this file with the full licence text from https://www.apache.org/licenses/LICENSE-2.0.txt
+(GitHub's "Add file > Create new file > LICENSE > Choose a license template" does this for you).
