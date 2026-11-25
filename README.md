@@ -1,13 +1,13 @@
-# mod_ai_agent
+# mod_http_b and ngx_http_b_module
 
-An Apache httpd module that gives any website an interface for AI agents that speaks English. Load the module and every site on the server can be:
+Modules for **Apache httpd** (`mod_http_b`) and **nginx** (`ngx_http_b_module`, in `nginx/`) that give any website an interface for AI agents that speaks English. Load the module and every site on the server can be:
 
 - **browsed headlessly exactly as humans see it.** AI agents get the same bytes as a browser.
 - **explored through an English sitemap.** A JSON list of every page, each described in plain English.
 - **questioned in plain English.** An agent asks a question and gets an English answer with the relevant pages. This means *your* agent can hold a conversation with *the website*.
 - **a conversation.** Any URL can become a chat (`Accept: application/vnd.ai-chat+json`). The server tells the agent where it is, what it can do and where it can go; the agent replies with `say`, `do` or `go`. Browser plugins can use the same protocol to turn browsing into chat, or a hybrid of chat and HTML.
 - **used from Claude, ChatGPT and other assistants.** Every site is also an MCP server (`/.well-known/ai/mcp`). Add the site as a custom connector and the assistant can browse, ask and act on it.
-- **chatted with in the browser.** The included extension for Chrome, Brave, Edge, Opera, Firefox and Safari shows a chat beside any page that speaks ai-chat.
+- **chatted with in the browser.** The included extension for Chrome, Brave, Edge, Opera, Firefox and Safari shows a chat beside any page that speaks http-b.
 - **fair to advertisers.** Ads are relayed to agents in a separate, clearly labelled "sponsored" block, never mixed into content or answers.
 - **operated like a person clicking.** It learns everything a visitor can do: search, forms, log in, add to basket, check out, and the API calls behind app buttons. An agent can then do any of it through one endpoint. The site's real pages and forms are used, with the agent's own session, and the result comes back in English.
 - **aware of which pages need a login.** It reads the site's PHP and JavaScript code to work out which pages require signing in. Agents are told, and those pages are never learned or quoted.
@@ -16,6 +16,10 @@ An Apache httpd module that gives any website an interface for AI agents that sp
 It works for static sites and for dynamic ones (PHP, CGI, WordPress, reverse-proxied apps). The English page views are produced by an output filter on the real response. Nothing on the site has to change.
 
 ## Quick start
+
+Using nginx? See [`nginx/ngx_http_b_module/README.md`](nginx/ngx_http_b_module/README.md): the same features, built from the same source, configured with `http_b_*` directives. The rest of this file uses the Apache names; each `AIAgentXyz` directive is `http_b_xyz` in nginx.
+
+### Apache
 
 ```sh
 # Debian / Ubuntu
@@ -87,7 +91,7 @@ By default detected agents get the **exact** page plus `Link` and `X-AI-Agent-He
 
 Every response also carries `Link: </.well-known/ai>; rel="ai-agent"`, so agents that don't identify themselves (for example a headless Chrome) can still find the interface.
 
-## Chat: any URL as a conversation (ai-chat/1)
+## Chat: any URL as a conversation (http-b/1)
 
 Pages are made beautiful for people. For agents, the useful form is a conversation: the server says where you are, what you can do and where you can go; the agent decides. **The full specification is in [docs/PROTOCOL.md](docs/PROTOCOL.md).**
 
@@ -240,7 +244,7 @@ Without an AI service, `/ask` answers by keyword search. With one, a language mo
 
 ```apache
 AIAgentAIService anthropic                     # or: openai | compatible
-AIAgentAIKey     file:/etc/apache2/ai_agent.key   # chmod 600; or env:ANTHROPIC_API_KEY
+AIAgentAIKey     file:/etc/apache2/http_b.key   # chmod 600; or env:ANTHROPIC_API_KEY
 #AIAgentAIModel  claude-sonnet-5-5             # required for openai/compatible
 #AIAgentAIEndpoint http://127.0.0.1:11434/v1/chat/completions   # for 'compatible'
 ```
@@ -276,7 +280,7 @@ AIAgentAIKey     file:/etc/apache2/ai_agent.key   # chmod 600; or env:ANTHROPIC_
 
 **What is never learned.** Requests with cookies or `Authorization` headers, responses marked `Cache-Control: private/no-store`, non-200 responses, excluded paths, and URLs whose query strings contain sensitive-looking parameters (`token`, `password`, `email`, `session`, `code`...).
 
-**Knowledge directory** (default `/var/lib/apache2/ai_agent/<host>/`, or `/var/lib/httpd/...`; mode 0750, owned by the Apache user):
+**Knowledge directory** (default `/var/lib/apache2/http_b/<host>/`, or `/var/lib/httpd/...`; mode 0750, owned by the Apache user):
 
 | File | Purpose |
 |---|---|
@@ -348,7 +352,7 @@ File names and code details appear only in this private report. Agents only ever
 
 ## Configuration
 
-All directives work at server level or inside `<VirtualHost>`. See `ai_agent.conf` for a commented example.
+All directives work at server level or inside `<VirtualHost>`. See `http_b.conf` for a commented example.
 
 | Directive | Default | Purpose |
 |---|---|---|
@@ -401,8 +405,8 @@ All directives work at server level or inside `<VirtualHost>`. See `ai_agent.con
 For logging, the module sets the request notes `ai-agent` and `ai-mode` and the environment variables `AI_AGENT` and `AI_MODE`:
 
 ```apache
-LogFormat "%h %t \"%r\" %>s agent=%{ai-agent}n mode=%{ai-mode}n" ai_agent
-CustomLog ${APACHE_LOG_DIR}/ai_agents.log ai_agent env=AI_MODE
+LogFormat "%h %t \"%r\" %>s agent=%{ai-agent}n mode=%{ai-mode}n" http_b
+CustomLog ${APACHE_LOG_DIR}/http_b.log http_b env=AI_MODE
 ```
 
 ## Security notes

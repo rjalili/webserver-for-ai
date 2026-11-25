@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal ai-chat/1 client: what a browser plugin or an AI agent does.
+"""Minimal http-b/1 client: what a browser plugin or an AI agent does.
 Keeps cookies and the conversation id, sends say/do/go turns, prints the server's turns.
 Usage as a library: c = Chat("http://localhost"); c.start("/shop/"); c.say("..."); c.do(form=1, fields={...}); c.go("/x")"""
 import json, sys, urllib.request, http.cookiejar

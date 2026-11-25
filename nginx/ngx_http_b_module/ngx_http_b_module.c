@@ -1,292 +1,187 @@
 /*
- * ngx_http_b_module - http-b for nginx (port of mod_http_b, stage 1).
+ * ngx_http_b_module - http-b for nginx.
  *
- * Stage 1: configuration, agent detection, mode selection (?ai=, X-AI-Mode,
- * Accept), removal of the ai= argument, discovery Link headers, the agent
- * help header and the welcome document at the prefix (/.well-known/ai).
+ * Every feature of mod_http_b runs here: the nginx side below handles
+ * configuration, request phases, filters and threads; the protocol itself is
+ * the shared core in mod_http_b.c, driven through hb_core.h.
+ *
+ * Directives: every Apache directive AIAgentXyz is available as http_b_xyz
+ * with the same arguments, in the http and server blocks.
  */
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
-
-#define HB_NONE  0
-#define HB_EXACT 1
-#define HB_GUIDE 2
-#define HB_TEXT  3
-#define HB_CHAT  4
+#if (NGX_THREADS)
+#include <ngx_thread_pool.h>
+#endif
+#include "hb_core.h"
 
 typedef struct {
-    ngx_flag_t   enable;
-    ngx_uint_t   default_mode;
-    ngx_array_t *user_agents;   /* ngx_str_t, lower case */
-    ngx_flag_t   builtin_ua;
-    ngx_str_t    site_name;
-    ngx_str_t    site_desc;
-    ngx_str_t    contact;
-    ngx_str_t    prefix;
-    ngx_array_t *excludes;      /* ngx_str_t */
-    ngx_flag_t   advertise;
-} ngx_http_b_loc_conf_t;
+    hb_server   *hb;
+    ngx_http_core_srv_conf_t *cscf;
+} ngx_http_b_srv_conf_t;
 
 typedef struct {
-    ngx_uint_t   mode;
-    ngx_str_t    agent;
-    const char  *source;
+    ngx_array_t  servers;      /* ngx_http_b_srv_conf_t * */
+    ngx_uint_t   any_enabled;
+#if (NGX_THREADS)
+    ngx_thread_pool_t *tp;
+#endif
+} ngx_http_b_main_conf_t;
+
+typedef struct {
+    hb_req      *q;
     ngx_uint_t   endpoint;
-    ngx_str_t    public_uri;   /* the URI the client asked for */
+    ngx_uint_t   filters;      /* HB_FILTER_* active on this response */
+    ngx_uint_t   done;
+    u_char      *body; size_t blen; ngx_int_t rc;
+    ngx_http_request_t *r;
 } ngx_http_b_ctx_t;
 
 static ngx_int_t ngx_http_b_init(ngx_conf_t *cf);
-static void *ngx_http_b_create_loc_conf(ngx_conf_t *cf);
-static char *ngx_http_b_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
-static char *ngx_http_b_set_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-static char *ngx_http_b_add_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static ngx_int_t ngx_http_b_init_module(ngx_cycle_t *cycle);
+static ngx_int_t ngx_http_b_init_process(ngx_cycle_t *cycle);
+static void *ngx_http_b_create_main_conf(ngx_conf_t *cf);
+static void *ngx_http_b_create_srv_conf(ngx_conf_t *cf);
+static char *ngx_http_b_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child);
+static char *ngx_http_b_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
-
-static const char *builtin_agents[] = {
-    "gptbot", "chatgpt-user", "oai-searchbot", "claudebot", "claude-user",
-    "claude-searchbot", "claude-web", "anthropic-ai", "perplexitybot",
-    "perplexity-user", "google-extended", "google-cloudvertexbot",
-    "gemini-deep-research", "googleagent", "bytespider", "ccbot", "cohere-ai",
-    "cohere-training-data-crawler", "meta-externalagent",
-    "meta-externalfetcher", "facebookbot", "applebot-extended", "amazonbot",
-    "duckassistbot", "mistralai-user", "youbot", "ai2bot", "diffbot",
-    "timpibot", "omgili", "petalbot", "kangaroo bot", "ai-agent", "llm",
-    "agent-browser", NULL
-};
+static ngx_http_output_body_filter_pt   ngx_http_next_body_filter;
 
 static ngx_command_t ngx_http_b_commands[] = {
-    { ngx_string("http_b"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, enable), NULL },
-    { ngx_string("http_b_default_mode"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_http_b_set_mode, NGX_HTTP_LOC_CONF_OFFSET, 0, NULL },
-    { ngx_string("http_b_user_agent"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
-      ngx_http_b_add_list, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, user_agents), (void *) 1 },
-    { ngx_string("http_b_builtin_user_agents"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, builtin_ua), NULL },
-    { ngx_string("http_b_site_name"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, site_name), NULL },
-    { ngx_string("http_b_site_description"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, site_desc), NULL },
-    { ngx_string("http_b_contact"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, contact), NULL },
-    { ngx_string("http_b_prefix"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, prefix), NULL },
-    { ngx_string("http_b_exclude"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
-      ngx_http_b_add_list, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, excludes), NULL },
-    { ngx_string("http_b_advertise"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_b_loc_conf_t, advertise), NULL },
+    { ngx_string("http_b"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgent" },
+    { ngx_string("http_b_default_mode"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentDefaultMode" },
+    { ngx_string("http_b_user_agent"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentUserAgent" },
+    { ngx_string("http_b_builtin_user_agents"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentBuiltinUserAgents" },
+    { ngx_string("http_b_site_name"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentSiteName" },
+    { ngx_string("http_b_site_description"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentSiteDescription" },
+    { ngx_string("http_b_contact"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentContact" },
+    { ngx_string("http_b_prefix"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentPrefix" },
+    { ngx_string("http_b_describe"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentDescribe" },
+    { ngx_string("http_b_exclude"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentExclude" },
+    { ngx_string("http_b_faq"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentFAQ" },
+    { ngx_string("http_b_max_pages"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentMaxPages" },
+    { ngx_string("http_b_max_buffer"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentMaxBuffer" },
+    { ngx_string("http_b_max_text"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentMaxText" },
+    { ngx_string("http_b_check_access"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentCheckAccess" },
+    { ngx_string("http_b_llms_txt"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLlmsTxt" },
+    { ngx_string("http_b_advertise"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAdvertise" },
+    { ngx_string("http_b_ai_service"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIService" },
+    { ngx_string("http_b_ai_key"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIKey" },
+    { ngx_string("http_b_ai_model"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIModel" },
+    { ngx_string("http_b_ai_endpoint"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIEndpoint" },
+    { ngx_string("http_b_ai_timeout"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAITimeout" },
+    { ngx_string("http_b_ai_max_tokens"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIMaxTokens" },
+    { ngx_string("http_b_ai_rate_limit"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIRateLimit" },
+    { ngx_string("http_b_ai_context"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAIContext" },
+    { ngx_string("http_b_activation"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentActivation" },
+    { ngx_string("http_b_learn_period"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLearnPeriod" },
+    { ngx_string("http_b_learn_min_pages"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLearnMinPages" },
+    { ngx_string("http_b_learn_max_pages"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLearnMaxPages" },
+    { ngx_string("http_b_learn_traffic"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLearnTraffic" },
+    { ngx_string("http_b_learn_query_strings"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLearnQueryStrings" },
+    { ngx_string("http_b_knowledge_dir"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentKnowledgeDir" },
+    { ngx_string("http_b_log_questions"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLogQuestions" },
+    { ngx_string("http_b_learning"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentLearning" },
+    { ngx_string("http_b_code_scan"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentCodeScan" },
+    { ngx_string("http_b_source_dir"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentSourceDir" },
+    { ngx_string("http_b_code_scan_interval"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentCodeScanInterval" },
+    { ngx_string("http_b_actions"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentActions" },
+    { ngx_string("http_b_act_rate_limit"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentActRateLimit" },
+    { ngx_string("http_b_ads"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAds" },
+    { ngx_string("http_b_ad"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAd" },
+    { ngx_string("http_b_ads_file"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAdsFile" },
+    { ngx_string("http_b_ads_max"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAdsMax" },
+    { ngx_string("http_b_ads_required"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAdsRequired" },
+    { ngx_string("http_b_ads_terms"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentAdsTerms" },
+    { ngx_string("http_b_list_protected"), NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_1MORE,
+      ngx_http_b_directive, NGX_HTTP_SRV_CONF_OFFSET, 0, (void *) "AIAgentListProtected" },
     ngx_null_command
 };
 
 static ngx_http_module_t ngx_http_b_module_ctx = {
-    NULL, ngx_http_b_init, NULL, NULL, NULL, NULL,
-    ngx_http_b_create_loc_conf, ngx_http_b_merge_loc_conf
+    NULL, ngx_http_b_init,
+    ngx_http_b_create_main_conf, NULL,
+    ngx_http_b_create_srv_conf, ngx_http_b_merge_srv_conf,
+    NULL, NULL
 };
 
 ngx_module_t ngx_http_b_module = {
     NGX_MODULE_V1, &ngx_http_b_module_ctx, ngx_http_b_commands, NGX_HTTP_MODULE,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NGX_MODULE_V1_PADDING
+    NULL, ngx_http_b_init_module, ngx_http_b_init_process, NULL, NULL, NULL, NULL,
+    NGX_MODULE_V1_PADDING
 };
 
 /* ---------------------------------------------------------------- */
-/* small helpers                                                     */
-/* ---------------------------------------------------------------- */
 
-typedef struct { ngx_pool_t *p; u_char *s; size_t len, cap; } hb_buf_t;
-
-static void hb_init(hb_buf_t *b, ngx_pool_t *p, size_t cap)
-{ b->p = p; b->cap = cap; b->len = 0; b->s = ngx_pnalloc(p, cap); }
-
-static void hb_putn(hb_buf_t *b, const u_char *s, size_t n)
+static char *hb_cstr(ngx_pool_t *p, ngx_str_t *s)
 {
-    if (b->s == NULL) return;
-    if (b->len + n > b->cap) {
-        size_t nc = (b->cap + n) * 2;
-        u_char *ns = ngx_pnalloc(b->p, nc);
-        if (ns == NULL) { b->s = NULL; return; }
-        ngx_memcpy(ns, b->s, b->len); b->s = ns; b->cap = nc;
-    }
-    ngx_memcpy(b->s + b->len, s, n); b->len += n;
-}
-static void hb_puts(hb_buf_t *b, const char *s) { hb_putn(b, (const u_char *) s, ngx_strlen(s)); }
-static void hb_putc(hb_buf_t *b, char c) { hb_putn(b, (u_char *) &c, 1); }
-
-static void hb_json(hb_buf_t *b, const u_char *s, size_t n)
-{
-    size_t i; u_char tmp[8];
-    hb_putc(b, '"');
-    for (i = 0; i < n; i++) {
-        u_char c = s[i];
-        if (c == '"' || c == '\\') { hb_putc(b, '\\'); hb_putc(b, c); }
-        else if (c == '\n') hb_puts(b, "\\n");
-        else if (c == '\r') hb_puts(b, "\\r");
-        else if (c == '\t') hb_puts(b, "\\t");
-        else if (c < 0x20) { tmp[0]='\\'; tmp[1]='u'; tmp[2]='0'; tmp[3]='0'; tmp[4]="0123456789abcdef"[c >> 4]; tmp[5]="0123456789abcdef"[c & 15]; hb_putn(b, tmp, 6); }
-        else hb_putc(b, c);
-    }
-    hb_putc(b, '"');
-}
-static void hb_jstr(hb_buf_t *b, const char *k, const char *v)
-{ hb_json(b, (u_char *) k, ngx_strlen(k)); hb_putc(b, ':'); hb_json(b, (u_char *) v, ngx_strlen(v)); }
-static void hb_jnstr(hb_buf_t *b, const char *k, ngx_str_t *v)
-{ hb_json(b, (u_char *) k, ngx_strlen(k)); hb_putc(b, ':'); hb_json(b, v->data, v->len); }
-
-static const char *hb_cstr(ngx_pool_t *p, ngx_str_t *s)
-{
-    u_char *c = ngx_pnalloc(p, s->len + 1);
-    if (c == NULL) return "";
+    char *c = ngx_pnalloc(p, s->len + 1);
+    if (c == NULL) return NULL;
     ngx_memcpy(c, s->data, s->len); c[s->len] = 0;
-    return (const char *) c;
+    return c;
 }
 
-static ngx_uint_t hb_parse_mode(u_char *v, size_t n)
+static void hb_ngx_log(int level, const char *msg)
 {
-#define IS(w) (n == sizeof(w) - 1 && ngx_strncasecmp(v, (u_char *) w, n) == 0)
-    if (v == NULL || n == 0) return HB_NONE;
-    if (IS("exact") || IS("raw") || IS("html")) return HB_EXACT;
-    if (IS("guide") || IS("json")) return HB_GUIDE;
-    if (IS("text") || IS("markdown") || IS("md")) return HB_TEXT;
-    if (IS("chat") || IS("conversation")) return HB_CHAT;
-#undef IS
-    return HB_NONE;
-}
-
-#if (NGX_DEBUG)
-static const char *hb_mode_name(ngx_uint_t m)
-{
-    return m == HB_GUIDE ? "guide" : m == HB_TEXT ? "text" : m == HB_EXACT ? "exact"
-         : m == HB_CHAT ? "chat" : "none";
-}
-#endif
-
-static ngx_table_elt_t *hb_header_in(ngx_http_request_t *r, const char *name)
-{
-    ngx_list_part_t *part = &r->headers_in.headers.part;
-    ngx_table_elt_t *h = part->elts;
-    size_t n = ngx_strlen(name);
-    ngx_uint_t i;
-    for (i = 0; ; i++) {
-        if (i >= part->nelts) {
-            if (part->next == NULL) break;
-            part = part->next; h = part->elts; i = 0;
-        }
-        if (h[i].hash && h[i].key.len == n && ngx_strncasecmp(h[i].key.data, (u_char *) name, n) == 0)
-            return &h[i];
-    }
-    return NULL;
-}
-
-static u_char *hb_strcasestr(ngx_str_t *hay, const char *needle)
-{
-    size_t n = ngx_strlen(needle), i;
-    if (hay == NULL || hay->len < n) return NULL;
-    for (i = 0; i + n <= hay->len; i++)
-        if (ngx_strncasecmp(hay->data + i, (u_char *) needle, n) == 0) return hay->data + i;
-    return NULL;
-}
-
-static ngx_int_t hb_add_header(ngx_http_request_t *r, const char *k, ngx_str_t *v)
-{
-    ngx_table_elt_t *h = ngx_list_push(&r->headers_out.headers);
-    if (h == NULL) return NGX_ERROR;
-    h->hash = 1; h->next = NULL;
-    h->key.data = (u_char *) k; h->key.len = ngx_strlen(k);
-    h->value = *v;
-    return NGX_OK;
-}
-
-static int hb_excluded(ngx_http_b_loc_conf_t *c, ngx_str_t *uri)
-{
-    ngx_uint_t i; ngx_str_t *e;
-    if (c->excludes == NULL) return 0;
-    e = c->excludes->elts;
-    for (i = 0; i < c->excludes->nelts; i++)
-        if (uri->len >= e[i].len && ngx_strncmp(uri->data, e[i].data, e[i].len) == 0) return 1;
-    return 0;
-}
-
-static int hb_isalpha(u_char c) { c |= 0x20; return c >= 'a' && c <= 'z'; }
-
-static ngx_int_t hb_detect_agent(ngx_http_request_t *r, ngx_http_b_loc_conf_t *c, ngx_str_t *out)
-{
-    ngx_table_elt_t *xa = hb_header_in(r, "X-AI-Agent");
-    ngx_str_t ua; u_char *l; ngx_uint_t i; ngx_str_t *pat;
-    if (xa) {
-        if (xa->value.len) { *out = xa->value; } else { ngx_str_set(out, "X-AI-Agent"); }
-        return 1;
-    }
-    if (r->headers_in.user_agent == NULL) return 0;
-    ua = r->headers_in.user_agent->value;
-    l = ngx_pnalloc(r->pool, ua.len + 1);
-    if (l == NULL) return 0;
-    ngx_strlow(l, ua.data, ua.len); l[ua.len] = 0;
-    if (c->user_agents) {
-        pat = c->user_agents->elts;
-        for (i = 0; i < c->user_agents->nelts; i++)
-            if (ngx_strstr(l, hb_cstr(r->pool, &pat[i]))) { *out = pat[i]; return 1; }
-    }
-    if (c->builtin_ua) {
-        for (i = 0; builtin_agents[i]; i++) {
-            if (ngx_strcmp(builtin_agents[i], "llm") == 0) {
-                u_char *s = (u_char *) ngx_strstr(l, "llm");
-                if (s && (s == l || !hb_isalpha(s[-1])) && !hb_isalpha(s[3])) {
-                    ngx_str_set(out, "llm"); return 1;
-                }
-                continue;
-            }
-            if (ngx_strstr(l, builtin_agents[i])) {
-                out->data = (u_char *) builtin_agents[i]; out->len = ngx_strlen(builtin_agents[i]);
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-/* Remove ai=... from the arguments; returns 1 and the value if present. */
-static int hb_strip_ai_arg(ngx_http_request_t *r, ngx_str_t *val)
-{
-    u_char *p, *end, *tok, *amp, *o, *start;
-    int found = 0;
-    if (r->args.len == 0) return 0;
-    start = ngx_pnalloc(r->pool, r->args.len);
-    if (start == NULL) return 0;
-    o = start; p = r->args.data; end = p + r->args.len;
-    while (p < end) {
-        tok = p;
-        amp = ngx_strlchr(p, end, '&');
-        if (amp == NULL) amp = end;
-        if (amp - tok >= 3 && ngx_strncmp(tok, "ai=", 3) == 0) {
-            val->data = tok + 3; val->len = amp - tok - 3; found = 1;
-        } else if (amp - tok == 2 && ngx_strncmp(tok, "ai", 2) == 0) {
-            ngx_str_set(val, "guide"); found = 1;
-        } else if (amp > tok) {
-            if (o > start) *o++ = '&';
-            o = ngx_cpymem(o, tok, amp - tok);
-        }
-        p = amp + 1;
-    }
-    if (found) {
-        r->args.data = start; r->args.len = o - start;
-        r->valid_unparsed_uri = 0;   /* upstreams rebuild the URI without ai= */
-    }
-    return found;
+    ngx_uint_t l = level == HB_LOG_ERR ? NGX_LOG_ERR : level == HB_LOG_WARN ? NGX_LOG_WARN
+                 : level == HB_LOG_INFO ? NGX_LOG_INFO : NGX_LOG_DEBUG;
+    ngx_log_error(l, ngx_cycle->log, 0, "http-b: %s", msg);
 }
 
 /* The module context is wiped by internal redirects (index files,
  * error_page, try_files); keep it reachable through a pool cleanup. */
-static void hb_ctx_marker(void *data) { (void) data; }
+static void hb_ctx_cleanup(void *data)
+{
+    ngx_http_b_ctx_t *ctx = data;
+    if (ctx->q) { hb_core_req_end(ctx->q); ctx->q = NULL; }
+}
 
 static ngx_http_b_ctx_t *hb_get_ctx(ngx_http_request_t *r)
 {
@@ -294,7 +189,7 @@ static ngx_http_b_ctx_t *hb_get_ctx(ngx_http_request_t *r)
     ngx_pool_cleanup_t *cln;
     if (ctx) return ctx;
     for (cln = r->pool->cleanup; cln; cln = cln->next) {
-        if (cln->handler == hb_ctx_marker) {
+        if (cln->handler == hb_ctx_cleanup) {
             ctx = cln->data;
             ngx_http_set_ctx(r, ctx, ngx_http_b_module);
             return ctx;
@@ -303,314 +198,581 @@ static ngx_http_b_ctx_t *hb_get_ctx(ngx_http_request_t *r)
     return NULL;
 }
 
-/* ---------------------------------------------------------------- */
-/* welcome document                                                  */
-/* ---------------------------------------------------------------- */
-
-static ngx_int_t hb_send(ngx_http_request_t *r, ngx_uint_t status, const char *ctype, hb_buf_t *b)
+static ngx_int_t hb_add_header(ngx_http_request_t *r, const char *k, const char *v)
 {
-    ngx_buf_t *buf; ngx_chain_t out; ngx_int_t rc;
-    if (b->s == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    r->headers_out.status = status;
-    r->headers_out.content_type.data = (u_char *) ctype;
-    r->headers_out.content_type.len = ngx_strlen(ctype);
-    r->headers_out.content_type_len = r->headers_out.content_type.len;
-    r->headers_out.content_length_n = b->len;
-    if (r->method == NGX_HTTP_HEAD) r->header_only = 1;
-    rc = ngx_http_send_header(r);
-    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) return rc;
-    buf = ngx_calloc_buf(r->pool);
-    if (buf == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    buf->pos = b->s; buf->last = b->s + b->len; buf->memory = 1;
-    buf->last_buf = (r == r->main) ? 1 : 0; buf->last_in_chain = 1;
-    out.buf = buf; out.next = NULL;
-    return ngx_http_output_filter(r, &out);
-}
-
-static const char *hb_base_url(ngx_http_request_t *r)
-{
-    ngx_str_t host = r->headers_in.host ? r->headers_in.host->value : r->headers_in.server;
-    const char *scheme = "http";
-    u_char *p;
-#if (NGX_HTTP_SSL)
-    if (r->connection->ssl) scheme = "https";
-#endif
-    p = ngx_pnalloc(r->pool, host.len + 16);
-    if (p == NULL) return "";
-    ngx_sprintf(p, "%s://%V%Z", scheme, &host);
-    return (const char *) p;
-}
-
-static ngx_int_t hb_welcome(ngx_http_request_t *r, ngx_http_b_loc_conf_t *c)
-{
-    hb_buf_t b; char *msg; size_t ml;
-    const char *pre = hb_cstr(r->pool, &c->prefix);
-    const char *name = c->site_name.len ? hb_cstr(r->pool, &c->site_name) : hb_cstr(r->pool, &r->headers_in.server);
-    const char *desc = c->site_desc.len ? hb_cstr(r->pool, &c->site_desc) : NULL;
-    const char *base = hb_base_url(r);
-    char tmp[512];
-
-    hb_init(&b, r->pool, 4096);
-    hb_putc(&b, '{');
-    hb_jstr(&b, "type", "welcome"); hb_putc(&b, ',');
-    hb_jstr(&b, "language", "en"); hb_putc(&b, ',');
-    ml = ngx_strlen(name) + ngx_strlen(base) + (desc ? ngx_strlen(desc) : 0) + 400;
-    msg = ngx_pnalloc(r->pool, ml);
-    if (msg == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    ngx_snprintf((u_char *) msg, ml,
-        "Hello. You are connected to %s (%s).%s%s This website has an interface for AI agents: "
-        "you can browse it exactly as a human would, or talk to it in plain English. Every response from the "
-        "endpoints listed below is in English, so you can have a conversation with this site on behalf of your user.%Z",
-        name, base, desc ? " " : "", desc ? desc : "");
-    hb_jstr(&b, "message", msg); hb_putc(&b, ',');
-    hb_puts(&b, "\"site\":{"); hb_jstr(&b, "name", name); hb_putc(&b, ',');
-    hb_jstr(&b, "url", base);
-    if (desc) { hb_putc(&b, ','); hb_jstr(&b, "description", desc); }
-    if (c->contact.len) { hb_putc(&b, ','); hb_jnstr(&b, "contact", &c->contact); }
-    hb_puts(&b, "},\"how_to_talk_to_this_site\":[");
-#define STEP(say, req, alt) do { hb_putc(&b, '{'); hb_jstr(&b, "you_want", say); hb_putc(&b, ','); \
-        hb_jstr(&b, "request", req); { const char *alt_ = (alt); if (alt_) { hb_putc(&b, ','); hb_jstr(&b, "alternative", alt_); } } \
-        hb_putc(&b, '}'); } while (0)
-    ngx_snprintf((u_char *) tmp, sizeof(tmp), "GET %s/sitemap.json%Z", pre);
-    STEP("A list of every page with an English description of each", tmp, (char *) NULL); hb_putc(&b, ',');
-    {
-        char a[256];
-        ngx_snprintf((u_char *) tmp, sizeof(tmp), "GET %s/ask?q=<your question>%Z", pre);
-        ngx_snprintf((u_char *) a, sizeof(a), "POST %s/ask with JSON {\"question\": \"...\"}%Z", pre);
-        STEP("To ask the site a question in plain English", tmp, a); hb_putc(&b, ',');
-        ngx_snprintf((u_char *) a, sizeof(a), "GET %s/page?url=<path>, or send the header 'X-AI-Mode: guide' "
-                     "or 'Accept: application/vnd.ai+json'%Z", pre);
-        STEP("An English explanation of one page (summary, outline, text, links, forms)", "GET <page URL>?ai=guide", a);
-        hb_putc(&b, ',');
-        ngx_snprintf((u_char *) tmp, sizeof(tmp), "GET %s/actions to see what is possible, then POST %s/act with "
-                     "JSON {\"action\": \"<id>\", \"fields\": {...}}%Z", pre, pre);
-        ngx_snprintf((u_char *) a, sizeof(a), "POST %s/act with {\"open\": \"/page\"} to follow a link, or "
-                     "{\"page\": \"/page\", \"form\": 1, \"fields\": {...}} to use any form you see%Z", pre);
-        STEP("To do something on the site exactly as a person would by clicking (search, fill in a form, log in, "
-             "add to basket, order)", tmp, a); hb_putc(&b, ',');
-        ngx_snprintf((u_char *) a, sizeof(a), "then POST the same URL or %s/chat with {\"conversation\": \"<id>\", "
-                     "\"say\" | \"do\" | \"go\": ...}%Z", pre);
-        STEP("A conversation with the site, starting at any page (the server tells you where you are, what you can "
-             "do and where you can go; you reply with say/do/go)",
-             "GET <page URL> with 'Accept: application/vnd.ai-chat+json' (or <page URL>?ai=chat)", a);
-        hb_putc(&b, ',');
+    ngx_table_elt_t *h;
+    size_t kl = ngx_strlen(k), vl = ngx_strlen(v);
+    h = ngx_list_push(&r->headers_out.headers);
+    if (h == NULL) return NGX_ERROR;
+    h->hash = 1; h->next = NULL;
+    h->key.data = ngx_pnalloc(r->pool, kl); h->value.data = ngx_pnalloc(r->pool, vl);
+    if (h->key.data == NULL || h->value.data == NULL) return NGX_ERROR;
+    ngx_memcpy(h->key.data, k, kl); h->key.len = kl;
+    ngx_memcpy(h->value.data, v, vl); h->value.len = vl;
+    if (kl == 13 && ngx_strncasecmp((u_char *) k, (u_char *) "Cache-Control", 13) == 0) {
+        r->headers_out.cache_control = h;
     }
-    STEP("A page as readable Markdown text", "GET <page URL>?ai=text",
-         "send the header 'X-AI-Mode: text' or 'Accept: text/markdown'"); hb_putc(&b, ',');
-    STEP("A page exactly as a human's browser receives it", "GET <page URL>?ai=exact",
-         "send the header 'X-AI-Mode: exact'");
-#undef STEP
-    hb_puts(&b, "],\"conversational_ai\":{");
-    hb_jstr(&b, "status", "keyword-search"); hb_putc(&b, ',');
-    hb_jstr(&b, "about", "Questions are answered by searching the site's pages; no AI service is configured.");
-    hb_puts(&b, "},\"login_requirements\":{");
-    hb_jstr(&b, "about", "Not analysed (code scanning is off).");
-    hb_puts(&b, "},");
-    hb_jstr(&b, "protocol", "http-b/1");
-    hb_puts(&b, "}\n");
-    return hb_send(r, NGX_HTTP_OK, "application/json; charset=utf-8", &b);
+    return NGX_OK;
 }
 
-static ngx_int_t hb_endpoint_handler(ngx_http_request_t *r)
+/* hide a request header from nginx and from upstreams */
+static void hb_drop_header(ngx_http_request_t *r, ngx_table_elt_t *h)
 {
-    ngx_http_b_loc_conf_t *c = ngx_http_get_module_loc_conf(r, ngx_http_b_module);
-    ngx_str_t rest;
-    ngx_int_t rc;
-    if (!(r->method & (NGX_HTTP_GET | NGX_HTTP_HEAD | NGX_HTTP_POST))) return NGX_HTTP_NOT_ALLOWED;
-    rc = ngx_http_discard_request_body(r);
-    if (rc != NGX_OK) return rc;
-    rest.data = r->uri.data + c->prefix.len; rest.len = r->uri.len - c->prefix.len;
-    if (rest.len == 0 || (rest.len == 1 && rest.data[0] == '/')
-        || (rest.len == 11 && ngx_strncmp(rest.data, "/index.json", 11) == 0))
-        return hb_welcome(r, c);
-    /* sitemap, ask, page, actions, act, chat, mcp: later stages */
-    return NGX_HTTP_NOT_FOUND;
+    static u_char dropped[] = "X-Http-B-Dropped";
+    if (h == r->headers_in.if_modified_since) r->headers_in.if_modified_since = NULL;
+    if (h == r->headers_in.if_none_match) r->headers_in.if_none_match = NULL;
+    if (h == r->headers_in.if_unmodified_since) r->headers_in.if_unmodified_since = NULL;
+    if (h == r->headers_in.if_match) r->headers_in.if_match = NULL;
+    if (h == r->headers_in.if_range) r->headers_in.if_range = NULL;
+    if (h == r->headers_in.range) r->headers_in.range = NULL;
+#if (NGX_HTTP_GZIP || NGX_HTTP_HEADERS)
+    if (h == r->headers_in.accept_encoding) r->headers_in.accept_encoding = NULL;
+#endif
+    if (h->key.len == 15 && ngx_strncasecmp(h->key.data, (u_char *) "Accept-Encoding", 15) == 0) {
+        ngx_str_set(&h->value, "identity");
+        return;
+    }
+    h->key.data = dropped; h->key.len = sizeof(dropped) - 1;
+    h->lowcase_key = (u_char *) "x-http-b-dropped";
+    h->hash = ngx_hash_key(h->lowcase_key, h->key.len);
+    ngx_str_set(&h->value, "1");
+}
+
+/* Requests the core makes to this server on an agent's behalf carry the
+ * agent's address; like the realip module, make nginx (allow/deny, logs,
+ * upstreams) see that address for the rest of the request. */
+typedef struct {
+    ngx_connection_t *c;
+    struct sockaddr *sockaddr; socklen_t socklen; ngx_str_t addr_text;
+} hb_addr_save_t;
+
+static void hb_addr_restore(void *data)
+{
+    hb_addr_save_t *s = data;
+    s->c->sockaddr = s->sockaddr; s->c->socklen = s->socklen; s->c->addr_text = s->addr_text;
+}
+
+static ngx_int_t hb_set_client_addr(ngx_http_request_t *r, const char *ip)
+{
+    ngx_connection_t *c = r->connection;
+    ngx_addr_t addr;
+    ngx_str_t s;
+    ngx_pool_cleanup_t *cln;
+    hb_addr_save_t *sv;
+    u_char *text;
+    s.data = (u_char *) ip; s.len = ngx_strlen(ip);
+    if (s.len == c->addr_text.len && ngx_strncmp(s.data, c->addr_text.data, s.len) == 0) return NGX_OK;
+    if (ngx_parse_addr(c->pool, &addr, s.data, s.len) != NGX_OK) return NGX_DECLINED;
+    cln = ngx_pool_cleanup_add(r->pool, sizeof(hb_addr_save_t));
+    if (cln == NULL) return NGX_ERROR;
+    sv = cln->data;
+    sv->c = c; sv->sockaddr = c->sockaddr; sv->socklen = c->socklen; sv->addr_text = c->addr_text;
+    cln->handler = hb_addr_restore;
+    text = ngx_pnalloc(c->pool, s.len);
+    if (text == NULL) return NGX_ERROR;
+    ngx_memcpy(text, s.data, s.len);
+    ngx_inet_set_port(addr.sockaddr, ngx_inet_get_port(c->sockaddr));
+    c->sockaddr = addr.sockaddr; c->socklen = addr.socklen;
+    c->addr_text.data = text; c->addr_text.len = s.len;
+    return NGX_OK;
+}
+
+static int hb_is_loopback(ngx_connection_t *c)
+{
+    return (c->addr_text.len > 4 && ngx_strncmp(c->addr_text.data, "127.", 4) == 0)
+        || (c->addr_text.len == 3 && ngx_strncmp(c->addr_text.data, "::1", 3) == 0);
 }
 
 /* ---------------------------------------------------------------- */
-/* request phase: mode and endpoint selection                        */
+/* request phase                                                     */
 /* ---------------------------------------------------------------- */
+
+static ngx_int_t hb_content_handler(ngx_http_request_t *r);
 
 static ngx_int_t ngx_http_b_rewrite_handler(ngx_http_request_t *r)
 {
-    ngx_http_b_loc_conf_t *c;
+    ngx_http_b_srv_conf_t *bs;
     ngx_http_b_ctx_t *ctx;
-    ngx_table_elt_t *hv, *acc, *ct;
-    ngx_str_t qv = ngx_null_string, agent = ngx_null_string;
-    ngx_uint_t mode = HB_NONE;
-    int has_agent;
-
     ngx_pool_cleanup_t *cln;
+    ngx_list_part_t *part;
+    ngx_table_elt_t *h;
+    ngx_uint_t i, n;
+    hb_header *hh;
+    u_char addr[NGX_SOCKADDRLEN], *end;
+    ngx_str_t local = { 0, addr }, path;
+    size_t root = 0;
+    char *method, *uri, *args, *host, *client, *lip, *docroot = NULL, *via = NULL;
+    const char *nargs;
+    int changed;
+    in_port_t port;
 
     if (r != r->main) return NGX_DECLINED;
     if (hb_get_ctx(r)) return NGX_DECLINED;   /* already decided before a redirect */
-    c = ngx_http_get_module_loc_conf(r, ngx_http_b_module);
-    if (!c->enable) return NGX_DECLINED;
+    bs = ngx_http_get_module_srv_conf(r, ngx_http_b_module);
+    if (bs->hb == NULL || !hb_core_enabled(bs->hb)) return NGX_DECLINED;
 
     ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_b_ctx_t));
     if (ctx == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    ctx->r = r;
     ngx_http_set_ctx(r, ctx, ngx_http_b_module);
     cln = ngx_pool_cleanup_add(r->pool, 0);
     if (cln == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    cln->handler = hb_ctx_marker; cln->data = ctx;
-    ctx->public_uri = r->uri;
+    cln->handler = hb_ctx_cleanup; cln->data = ctx;
 
-    if (r->uri.len >= c->prefix.len && ngx_strncmp(r->uri.data, c->prefix.data, c->prefix.len) == 0
-        && (r->uri.len == c->prefix.len || r->uri.data[c->prefix.len] == '/')) {
-        ctx->endpoint = 1;
-        r->content_handler = hb_endpoint_handler;
-        return NGX_DECLINED;
+    /* request headers */
+    n = 0;
+    for (part = &r->headers_in.headers.part; part; part = part->next) n += part->nelts;
+    hh = ngx_palloc(r->pool, (n + 1) * sizeof(hb_header));
+    if (hh == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    n = 0;
+    for (part = &r->headers_in.headers.part; part; part = part->next) {
+        h = part->elts;
+        for (i = 0; i < part->nelts; i++) {
+            if (h[i].hash == 0) continue;
+            if (h[i].key.len == 15 && ngx_strncasecmp(h[i].key.data, (u_char *) "X-Http-B-Client", 15) == 0) {
+                via = hb_cstr(r->pool, &h[i].value);
+                hb_drop_header(r, &h[i]);
+                continue;
+            }
+            hh[n].name = hb_cstr(r->pool, &h[i].key);
+            hh[n].value = hb_cstr(r->pool, &h[i].value);
+            n++;
+        }
     }
-    if (hb_excluded(c, &r->uri)) return NGX_DECLINED;
 
-    has_agent = hb_detect_agent(r, c, &agent);
-    hb_strip_ai_arg(r, &qv);
-    hv = hb_header_in(r, "X-AI-Mode");
-    acc = hb_header_in(r, "Accept");
-    ct = r->headers_in.content_type;
+    if (ngx_connection_local_sockaddr(r->connection, &local, 0) != NGX_OK) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    local.len = ngx_sock_ntop(r->connection->local_sockaddr, r->connection->local_socklen, addr,
+                              NGX_SOCKADDRLEN - 1, 0);
+    addr[local.len] = 0;
+    port = ngx_inet_get_port(r->connection->local_sockaddr);
 
-    if ((mode = hb_parse_mode(qv.data, qv.len))) ctx->source = "query";
-    else if (hv && (mode = hb_parse_mode(hv->value.data, hv->value.len))) ctx->source = "header";
-    else if ((acc && hb_strcasestr(&acc->value, "application/vnd.ai-chat+json"))
-             || (ct && hb_strcasestr(&ct->value, "application/vnd.ai-chat+json"))) {
-        mode = HB_CHAT; ctx->source = "header";
-    } else if (acc && hb_strcasestr(&acc->value, "application/vnd.ai+json")) {
-        mode = HB_GUIDE; ctx->source = "header";
-    } else if (acc && hb_strcasestr(&acc->value, "text/markdown")) {
-        u_char *md = hb_strcasestr(&acc->value, "text/markdown");
-        u_char *html = hb_strcasestr(&acc->value, "text/html");
-        if (html == NULL || md < html) { mode = HB_TEXT; ctx->source = "header"; }
+    end = ngx_http_map_uri_to_path(r, &path, &root, 0);
+    if (end && root) {
+        docroot = ngx_pnalloc(r->pool, root + 1);
+        if (docroot) {
+            ngx_memcpy(docroot, path.data, root); docroot[root] = 0;
+            if (root > 1 && docroot[root - 1] == '/') docroot[root - 1] = 0;
+        }
     }
-    if (!mode && has_agent) { mode = c->default_mode; ctx->source = "default"; }
-    if (mode && !has_agent && mode != HB_EXACT) { ngx_str_set(&agent, "explicit-request"); has_agent = 1; }
-    ctx->mode = mode;
-    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http-b mode %s from %s",
-                   hb_mode_name(mode), ctx->source ? ctx->source : "none");
-    if (has_agent) ctx->agent = agent;
 
-    if (mode == HB_GUIDE || mode == HB_TEXT) {
-        /* the transformation (stage 2) needs the full, uncompressed body */
-        r->headers_in.if_modified_since = NULL;
-        r->headers_in.if_none_match = NULL;
-        r->headers_in.if_range = NULL;
-        r->headers_in.range = NULL;
+    method = hb_cstr(r->pool, &r->method_name);
+    uri = hb_cstr(r->pool, &r->uri);
+    args = hb_cstr(r->pool, &r->args);
+    host = r->headers_in.host ? hb_cstr(r->pool, &r->headers_in.host->value) : hb_cstr(r->pool, &r->headers_in.server);
+    client = hb_cstr(r->pool, &r->connection->addr_text);
+    lip = (char *) addr;
+    if (via) {   /* "<secret> <agent address>", only from this server itself */
+        const char *secret = hb_core_secret();
+        size_t sl = ngx_strlen(secret);
+        if (sl && hb_is_loopback(r->connection) && ngx_strncmp(via, secret, sl) == 0 && via[sl] == ' ') {
+            client = via + sl + 1;
+            if (hb_set_client_addr(r, client) == NGX_ERROR) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+    }
+    if (!method || !uri || !args || !host || !client) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+
+    ctx->q = hb_core_req_begin(bs->hb, method, uri, args, host, client, lip, port,
+#if (NGX_HTTP_SSL)
+                               r->connection->ssl != NULL,
+#else
+                               0,
+#endif
+                               docroot, hh, (int) n, r->method == NGX_HTTP_HEAD);
+    if (ctx->q == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    if (hb_core_req_client_ip(ctx->q) && hb_set_client_addr(r, hb_core_req_client_ip(ctx->q)) == NGX_ERROR)
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+
+    nargs = hb_core_req_args(ctx->q, &changed);
+    if (nargs == NULL) nargs = "";
+    if (ngx_strlen(nargs) != r->args.len || ngx_strncmp(nargs, r->args.data, r->args.len) != 0) {
+        r->args.len = ngx_strlen(nargs);
+        r->args.data = ngx_pnalloc(r->pool, r->args.len + 1);
+        if (r->args.data == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        ngx_memcpy(r->args.data, nargs, r->args.len);
+        r->valid_unparsed_uri = 0;   /* upstreams rebuild the URI without ai= */
+    }
+
+    /* headers the core removed (conditionals, Accept-Encoding, X-AI-Agent-Act) */
+    for (part = &r->headers_in.headers.part; part; part = part->next) {
+        h = part->elts;
+        for (i = 0; i < part->nelts; i++) {
+            char *k;
+            if (h[i].hash == 0) continue;
+            k = hb_cstr(r->pool, &h[i].key);
+            if (k && !hb_core_req_has_header(ctx->q, k)) hb_drop_header(r, &h[i]);
+        }
+    }
+    if (hb_core_req_mode(ctx->q) == 2 || hb_core_req_mode(ctx->q) == 3) {
 #if (NGX_HTTP_GZIP)
         r->gzip_tested = 1; r->gzip_ok = 0;
 #endif
+    }
+
+    if (hb_core_req_endpoint(ctx->q)) {
+        ctx->endpoint = 1;
+        r->content_handler = hb_content_handler;
     }
     return NGX_DECLINED;
 }
 
 /* ---------------------------------------------------------------- */
-/* header filter: discovery and help headers                         */
+/* endpoints: run in a thread, because they may call AI services and */
+/* make HTTP requests back to this server                           */
 /* ---------------------------------------------------------------- */
+
+static ngx_int_t hb_send_result(ngx_http_request_t *r, ngx_http_b_ctx_t *ctx)
+{
+    const char *ctype, *body;
+    hb_header *h; int nh, k, status;
+    size_t len;
+    ngx_buf_t *b; ngx_chain_t out; ngx_int_t rc;
+
+    if (ctx->rc) return ctx->rc;
+    status = hb_core_out(ctx->q, &ctype, &h, &nh, &body, &len, 0);
+    r->headers_out.status = status ? (ngx_uint_t) status : NGX_HTTP_OK;
+    if (ctype) {
+        r->headers_out.content_type.len = ngx_strlen(ctype);
+        r->headers_out.content_type.data = ngx_pnalloc(r->pool, r->headers_out.content_type.len);
+        if (r->headers_out.content_type.data == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        ngx_memcpy(r->headers_out.content_type.data, ctype, r->headers_out.content_type.len);
+        r->headers_out.content_type_len = r->headers_out.content_type.len;
+    }
+    for (k = 0; k < nh; k++) {
+        if (hb_add_header(r, h[k].name, h[k].value) != NGX_OK) return NGX_ERROR;
+    }
+    r->headers_out.content_length_n = len;
+    rc = ngx_http_send_header(r);
+    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only || len == 0) {
+        if (len == 0 && rc == NGX_OK && !r->header_only) return ngx_http_send_special(r, NGX_HTTP_LAST);
+        return rc;
+    }
+    b = ngx_create_temp_buf(r->pool, len);
+    if (b == NULL) return NGX_ERROR;
+    b->last = ngx_cpymem(b->pos, body, len);
+    b->last_buf = 1; b->last_in_chain = 1;
+    out.buf = b; out.next = NULL;
+    return ngx_http_output_filter(r, &out);
+}
+
+#if (NGX_THREADS)
+static void hb_thread_run(void *data, ngx_log_t *log)
+{
+    ngx_http_b_ctx_t *ctx = data;
+    ctx->rc = hb_core_handle(ctx->q, (const char *) ctx->body, ctx->blen);
+}
+
+static void hb_thread_done(ngx_event_t *ev)
+{
+    ngx_http_b_ctx_t *ctx = ev->data;
+    ngx_http_request_t *r = ctx->r;
+    ngx_connection_t *c = r->connection;
+    r->main->blocked--;
+    r->aio = 0;
+    ngx_http_finalize_request(r, hb_send_result(r, ctx));
+    ngx_http_run_posted_requests(c);
+}
+#endif
+
+static void hb_body_ready(ngx_http_request_t *r)
+{
+    ngx_http_b_ctx_t *ctx = hb_get_ctx(r);
+    ngx_chain_t *cl;
+    size_t len = 0;
+    u_char *p;
+
+    if (ctx == NULL || ctx->q == NULL) { ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR); return; }
+    if (r->request_body && r->request_body->bufs) {
+        for (cl = r->request_body->bufs; cl; cl = cl->next)
+            len += cl->buf->in_file ? (size_t) (cl->buf->file_last - cl->buf->file_pos)
+                                    : (size_t) (cl->buf->last - cl->buf->pos);
+        p = ctx->body = ngx_pnalloc(r->pool, len + 1);
+        if (p == NULL) { ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR); return; }
+        for (cl = r->request_body->bufs; cl; cl = cl->next) {
+            if (cl->buf->in_file) {
+                ssize_t n = ngx_read_file(cl->buf->file, p, (size_t) (cl->buf->file_last - cl->buf->file_pos),
+                                          cl->buf->file_pos);
+                if (n < 0) { ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR); return; }
+                p += n;
+            } else p = ngx_cpymem(p, cl->buf->pos, cl->buf->last - cl->buf->pos);
+        }
+        ctx->blen = p - ctx->body;
+    }
+#if (NGX_THREADS)
+    {
+        ngx_http_b_main_conf_t *mc = ngx_http_get_module_main_conf(r, ngx_http_b_module);
+        if (mc->tp) {
+            ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, 0);
+            if (task == NULL) { ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR); return; }
+            task->ctx = ctx;
+            task->handler = hb_thread_run;
+            task->event.data = ctx;
+            task->event.handler = hb_thread_done;
+            if (ngx_thread_task_post(mc->tp, task) != NGX_OK) {
+                ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR); return;
+            }
+            r->main->blocked++;
+            r->aio = 1;
+            return;
+        }
+    }
+#endif
+    ctx->rc = hb_core_handle(ctx->q, (const char *) ctx->body, ctx->blen);
+    ngx_http_finalize_request(r, hb_send_result(r, ctx));
+}
+
+static ngx_int_t hb_content_handler(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+    r->request_body_in_single_buf = 1;
+    rc = ngx_http_read_client_request_body(r, hb_body_ready);
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) return rc;
+    return NGX_DONE;
+}
+
+/* ---------------------------------------------------------------- */
+/* response filters                                                  */
+/* ---------------------------------------------------------------- */
+
+/* the core "sets" these headers (Apache apr_table_set): drop what the page had */
+static void hb_unset_header(ngx_http_request_t *r, const char *name)
+{
+    ngx_list_part_t *part;
+    ngx_table_elt_t *h;
+    ngx_uint_t i;
+    size_t n = ngx_strlen(name);
+    for (part = &r->headers_out.headers.part; part; part = part->next) {
+        h = part->elts;
+        for (i = 0; i < part->nelts; i++)
+            if (h[i].hash && h[i].key.len == n && ngx_strncasecmp(h[i].key.data, (u_char *) name, n) == 0)
+                h[i].hash = 0;
+    }
+    if (n == 13 && ngx_strncasecmp((u_char *) name, (u_char *) "Cache-Control", 13) == 0)
+        r->headers_out.cache_control = NULL;
+}
+
+static ngx_int_t hb_apply_core_headers(ngx_http_request_t *r, ngx_http_b_ctx_t *ctx, int extra_only)
+{
+    const char *ctype, *body; hb_header *h; int nh, k; size_t len;
+    hb_core_out(ctx->q, &ctype, &h, &nh, &body, &len, extra_only);
+    for (k = 0; k < nh; k++) {
+        if (!extra_only && ngx_strcasecmp((u_char *) h[k].name, (u_char *) "Content-Encoding") == 0) continue;
+        if (!extra_only && (ngx_strcasecmp((u_char *) h[k].name, (u_char *) "Cache-Control") == 0
+                            || ngx_strcasecmp((u_char *) h[k].name, (u_char *) "Content-Language") == 0
+                            || ngx_strcasecmp((u_char *) h[k].name, (u_char *) "X-AI-Mode") == 0))
+            hb_unset_header(r, h[k].name);
+        if (hb_add_header(r, h[k].name, h[k].value) != NGX_OK) return NGX_ERROR;
+    }
+    return NGX_OK;
+}
 
 static ngx_int_t ngx_http_b_header_filter(ngx_http_request_t *r)
 {
-    ngx_http_b_loc_conf_t *c;
     ngx_http_b_ctx_t *ctx;
-    ngx_str_t v; size_t n; u_char *p; uintptr_t esc;
+    char *ct = NULL, *enc = NULL;
+    ngx_int_t status;
 
     if (r != r->main) return ngx_http_next_header_filter(r);
-    c = ngx_http_get_module_loc_conf(r, ngx_http_b_module);
     ctx = hb_get_ctx(r);
-    if (!c->enable || ctx == NULL || ctx->endpoint) return ngx_http_next_header_filter(r);
+    if (ctx == NULL || ctx->q == NULL || ctx->endpoint || ctx->done) return ngx_http_next_header_filter(r);
+    ctx->done = 1;
 
-    if (c->advertise || ctx->agent.len) {
-        esc = ngx_escape_uri(NULL, ctx->public_uri.data, ctx->public_uri.len, NGX_ESCAPE_URI);
-        n = 3 * c->prefix.len + ctx->public_uri.len + 2 * esc + 200;
-        p = ngx_pnalloc(r->pool, n);
-        if (p == NULL) return NGX_ERROR;
-        v.data = p;
-        p = ngx_sprintf(p, "<%V>; rel=\"ai-agent\"; type=\"application/json\", "
-                           "<%V/sitemap.json>; rel=\"ai-sitemap\"; type=\"application/json\", <",
-                        &c->prefix, &c->prefix);
-        p = (u_char *) ngx_escape_uri(p, ctx->public_uri.data, ctx->public_uri.len, NGX_ESCAPE_URI);
-        p = ngx_sprintf(p, ">; rel=\"alternate\"; type=\"application/vnd.ai-chat+json\"");
-        v.len = p - v.data;
-        if (hb_add_header(r, "Link", &v) != NGX_OK) return NGX_ERROR;
+    status = r->headers_out.status ? (ngx_int_t) r->headers_out.status : 200;
+    if (r->headers_out.content_type.len) {
+        ngx_str_t full = r->headers_out.content_type;
+        if (r->headers_out.charset.len) {
+            full.len = r->headers_out.content_type.len + r->headers_out.charset.len + 10;
+            full.data = ngx_pnalloc(r->pool, full.len);
+            if (full.data == NULL) return NGX_ERROR;
+            full.len = ngx_sprintf(full.data, "%V; charset=%V", &r->headers_out.content_type,
+                                   &r->headers_out.charset) - full.data;
+        }
+        ct = hb_cstr(r->pool, &full);
     }
-    if (ctx->mode && ctx->mode != HB_GUIDE && ctx->mode != HB_TEXT && ctx->agent.len) {
-        n = c->prefix.len + 120;
-        p = ngx_pnalloc(r->pool, n);
-        if (p == NULL) return NGX_ERROR;
-        v.data = p;
-        p = ngx_sprintf(p, "This site speaks English to AI agents. Add ?ai=guide or ?ai=text to any URL, "
-                           "or start at %V", &c->prefix);
-        v.len = p - v.data;
-        if (hb_add_header(r, "X-AI-Agent-Help", &v) != NGX_OK) return NGX_ERROR;
+    if (r->headers_out.content_encoding && r->headers_out.content_encoding->hash)
+        enc = hb_cstr(r->pool, &r->headers_out.content_encoding->value);
+    hb_core_resp_set(ctx->q, (int) status, ct, enc);
+    ctx->filters = hb_core_insert_filters(ctx->q, status >= 400);
+
+    if (ctx->filters & HB_FILTER_GUIDE) {
+        if (r->header_only) {          /* HEAD: nothing to transform */
+            ctx->filters = 0;
+            if (hb_apply_core_headers(r, ctx, 1) != NGX_OK) return NGX_ERROR;
+            return ngx_http_next_header_filter(r);
+        }
+        r->filter_need_in_memory = 1;
+        return NGX_OK;                 /* headers go out with the transformed body */
     }
-    if (ctx->mode) {
-        ngx_str_set(&v, "Accept, X-AI-Mode");
-        if (hb_add_header(r, "Vary", &v) != NGX_OK) return NGX_ERROR;
-    }
+    if (hb_apply_core_headers(r, ctx, 1) != NGX_OK) return NGX_ERROR;
+    if (ctx->filters & HB_FILTER_LEARN) r->filter_need_in_memory = 1;
     return ngx_http_next_header_filter(r);
+}
+
+static ngx_int_t hb_feed_chain(ngx_http_request_t *r, ngx_http_b_ctx_t *ctx, int which, ngx_chain_t *in, int consume,
+                               ngx_uint_t *last)
+{
+    ngx_chain_t *cl;
+    for (cl = in; cl; cl = cl->next) {
+        ngx_buf_t *b = cl->buf;
+        if (ngx_buf_in_memory(b) && b->last > b->pos) {
+            hb_core_filter_feed(ctx->q, which, (const char *) b->pos, b->last - b->pos);
+        } else if (b->in_file && b->file_last > b->file_pos) {
+            size_t n = (size_t) (b->file_last - b->file_pos);
+            u_char *tmp = ngx_pnalloc(r->pool, n);
+            ssize_t got;
+            if (tmp == NULL) return NGX_ERROR;
+            got = ngx_read_file(b->file, tmp, n, b->file_pos);
+            if (got > 0) hb_core_filter_feed(ctx->q, which, (const char *) tmp, (size_t) got);
+        }
+        if (consume) { b->pos = b->last; if (b->in_file) b->file_pos = b->file_last; }
+        if (b->last_buf) *last = 1;
+    }
+    return NGX_OK;
+}
+
+static ngx_int_t ngx_http_b_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
+{
+    ngx_http_b_ctx_t *ctx;
+    ngx_uint_t last = 0;
+
+    if (r != r->main || in == NULL) return ngx_http_next_body_filter(r, in);
+    ctx = hb_get_ctx(r);
+    if (ctx == NULL || ctx->q == NULL || ctx->endpoint || !ctx->filters) return ngx_http_next_body_filter(r, in);
+
+    if (ctx->filters & HB_FILTER_GUIDE) {
+        const char *ctype, *body; hb_header *h; int nh; size_t len;
+        ngx_buf_t *b; ngx_chain_t out; ngx_int_t rc;
+        int status;
+        if (hb_feed_chain(r, ctx, HB_FILTER_GUIDE, in, 1, &last) != NGX_OK) return NGX_ERROR;
+        if (!last) return NGX_OK;
+        hb_core_filter_finish(ctx->q, HB_FILTER_GUIDE);
+        ctx->filters = 0;
+        status = hb_core_out(ctx->q, &ctype, &h, &nh, &body, &len, 0);
+        if (status) r->headers_out.status = status;
+        if (ctype) {
+            r->headers_out.content_type.len = ngx_strlen(ctype);
+            r->headers_out.content_type.data = (u_char *) ctype;
+            r->headers_out.content_type_len = r->headers_out.content_type.len;
+            r->headers_out.content_type_lowcase = NULL;
+            r->headers_out.charset.len = 0;
+        }
+        ngx_http_clear_content_length(r);
+        ngx_http_clear_accept_ranges(r);
+        ngx_http_clear_etag(r);
+        if (r->headers_out.content_encoding) { r->headers_out.content_encoding->hash = 0; r->headers_out.content_encoding = NULL; }
+        r->headers_out.content_length_n = len;
+        if (hb_apply_core_headers(r, ctx, 0) != NGX_OK) return NGX_ERROR;
+        rc = ngx_http_next_header_filter(r);
+        if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) return rc;
+        b = ngx_create_temp_buf(r->pool, len ? len : 1);
+        if (b == NULL) return NGX_ERROR;
+        b->last = ngx_cpymem(b->pos, body, len);
+        b->last_buf = 1; b->last_in_chain = 1;
+        out.buf = b; out.next = NULL;
+        return ngx_http_next_body_filter(r, &out);
+    }
+    if (ctx->filters & HB_FILTER_LEARN) {
+        if (hb_feed_chain(r, ctx, HB_FILTER_LEARN, in, 0, &last) != NGX_OK) return NGX_ERROR;
+        if (last) { hb_core_filter_finish(ctx->q, HB_FILTER_LEARN); ctx->filters = 0; }
+    }
+    return ngx_http_next_body_filter(r, in);
 }
 
 /* ---------------------------------------------------------------- */
 /* configuration                                                     */
 /* ---------------------------------------------------------------- */
 
-static char *ngx_http_b_set_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+static char *ngx_http_b_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_b_loc_conf_t *c = conf;
+    ngx_http_b_srv_conf_t *bs = conf;
     ngx_str_t *v = cf->args->elts;
-    ngx_uint_t m = hb_parse_mode(v[1].data, v[1].len);
-    if (c->default_mode != NGX_CONF_UNSET_UINT) return "is duplicate";
-    if (m == HB_NONE || m == HB_CHAT) return "must be exact, guide or text";
-    c->default_mode = m;
-    return NGX_CONF_OK;
-}
-
-static char *ngx_http_b_add_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
-    ngx_array_t **a = (ngx_array_t **) ((char *) conf + cmd->offset);
-    ngx_str_t *v = cf->args->elts, *s;
+    const char *argv[16], *err;
     ngx_uint_t i;
-    if (*a == NULL || *a == NGX_CONF_UNSET_PTR) {
-        *a = ngx_array_create(cf->pool, 4, sizeof(ngx_str_t));
-        if (*a == NULL) return NGX_CONF_ERROR;
-    }
+    if (cf->args->nelts - 1 > 16) return "has too many arguments";
     for (i = 1; i < cf->args->nelts; i++) {
-        s = ngx_array_push(*a);
-        if (s == NULL) return NGX_CONF_ERROR;
-        *s = v[i];
-        if (cmd->post) {   /* lower-case user agent patterns */
-            s->data = ngx_pnalloc(cf->pool, v[i].len);
-            if (s->data == NULL) return NGX_CONF_ERROR;
-            ngx_strlow(s->data, v[i].data, v[i].len);
-        }
+        argv[i - 1] = hb_cstr(cf->pool, &v[i]);
+        if (argv[i - 1] == NULL) return NGX_CONF_ERROR;
+    }
+    err = hb_core_directive(bs->hb, (const char *) cmd->post, (int) cf->args->nelts - 1, argv);
+    if (err) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "\"%V\" (%s): %s", &cmd->name, (char *) cmd->post, err);
+        return NGX_CONF_ERROR;
     }
     return NGX_CONF_OK;
 }
 
-static void *ngx_http_b_create_loc_conf(ngx_conf_t *cf)
+static void *ngx_http_b_create_main_conf(ngx_conf_t *cf)
 {
-    ngx_http_b_loc_conf_t *c = ngx_pcalloc(cf->pool, sizeof(ngx_http_b_loc_conf_t));
-    if (c == NULL) return NULL;
-    c->enable = NGX_CONF_UNSET;
-    c->default_mode = NGX_CONF_UNSET_UINT;
-    c->user_agents = NGX_CONF_UNSET_PTR;
-    c->builtin_ua = NGX_CONF_UNSET;
-    c->excludes = NGX_CONF_UNSET_PTR;
-    c->advertise = NGX_CONF_UNSET;
-    return c;
+    ngx_http_b_main_conf_t *mc = ngx_pcalloc(cf->pool, sizeof(*mc));
+    char *prefix;
+    if (mc == NULL) return NULL;
+    if (ngx_array_init(&mc->servers, cf->pool, 4, sizeof(ngx_http_b_srv_conf_t *)) != NGX_OK) return NULL;
+    prefix = hb_cstr(cf->pool, &cf->cycle->prefix);
+    if (prefix && ngx_strlen(prefix) > 1 && prefix[ngx_strlen(prefix) - 1] == '/') prefix[ngx_strlen(prefix) - 1] = 0;
+    if (hb_core_global_init(hb_ngx_log, prefix, 0, 0) != 0)
+        return NULL;
+    return mc;
 }
 
-static char *ngx_http_b_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+static void *ngx_http_b_create_srv_conf(ngx_conf_t *cf)
 {
-    ngx_http_b_loc_conf_t *prev = parent, *c = child;
-    ngx_conf_merge_value(c->enable, prev->enable, 0);
-    ngx_conf_merge_uint_value(c->default_mode, prev->default_mode, HB_EXACT);
-    ngx_conf_merge_ptr_value(c->user_agents, prev->user_agents, NULL);
-    ngx_conf_merge_value(c->builtin_ua, prev->builtin_ua, 1);
-    ngx_conf_merge_str_value(c->site_name, prev->site_name, "");
-    ngx_conf_merge_str_value(c->site_desc, prev->site_desc, "");
-    ngx_conf_merge_str_value(c->contact, prev->contact, "");
-    ngx_conf_merge_str_value(c->prefix, prev->prefix, "/.well-known/ai");
-    ngx_conf_merge_ptr_value(c->excludes, prev->excludes, NULL);
-    ngx_conf_merge_value(c->advertise, prev->advertise, 1);
+    ngx_http_b_srv_conf_t *bs = ngx_pcalloc(cf->pool, sizeof(*bs));
+    if (bs == NULL) return NULL;
+    bs->hb = hb_core_server_create();
+    return bs;
+}
+
+static char *ngx_http_b_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+    ngx_http_b_srv_conf_t *prev = parent, *bs = child, **slot;
+    ngx_http_b_main_conf_t *mc = ngx_http_conf_get_module_main_conf(cf, ngx_http_b_module);
+    bs->hb = hb_core_server_merge(prev->hb, bs->hb);
+    bs->cscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_core_module);
+    slot = ngx_array_push(&mc->servers);
+    if (slot == NULL) return NGX_CONF_ERROR;
+    *slot = bs;
+    if (hb_core_enabled(bs->hb)) mc->any_enabled = 1;
     return NGX_CONF_OK;
+}
+
+static ngx_http_b_main_conf_t *hb_main_conf(ngx_cycle_t *cycle)
+{
+    ngx_http_conf_ctx_t *hc = (ngx_http_conf_ctx_t *) cycle->conf_ctx[ngx_http_module.index];
+    if (hc == NULL) return NULL;
+    return hc->main_conf[ngx_http_b_module.ctx_index];
+}
+
+static ngx_int_t ngx_http_b_init_module(ngx_cycle_t *cycle)
+{
+    ngx_http_b_main_conf_t *mc = hb_main_conf(cycle);
+    ngx_http_b_srv_conf_t **sv;
+    ngx_uint_t i;
+    const char *err;
+    ngx_core_conf_t *ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
+    if (mc == NULL || !mc->any_enabled || mc->servers.nelts == 0) return NGX_OK;
+    /* knowledge directories are created by the master and handed to the worker user */
+    if (ccf && ccf->user != (ngx_uid_t) NGX_CONF_UNSET_UINT) hb_core_set_user(ccf->user, ccf->group);
+    sv = mc->servers.elts;
+    for (i = 0; i < mc->servers.nelts; i++) {
+        char *name = NULL;
+        if (sv[i]->cscf && sv[i]->cscf->server_name.len) name = hb_cstr(cycle->pool, &sv[i]->cscf->server_name);
+        hb_core_server_identity(sv[i]->hb, name, 0, i + 1 < mc->servers.nelts ? sv[i + 1]->hb : NULL);
+    }
+    err = hb_core_post_config(sv[0]->hb);
+    if (err) { ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "%s", err); return NGX_ERROR; }
+    return NGX_OK;
+}
+
+static ngx_int_t ngx_http_b_init_process(ngx_cycle_t *cycle)
+{
+    ngx_http_b_main_conf_t *mc = hb_main_conf(cycle);
+    ngx_http_b_srv_conf_t **sv;
+    if (mc == NULL || !mc->any_enabled || mc->servers.nelts == 0) return NGX_OK;
+    sv = mc->servers.elts;
+    hb_core_child_init(sv[0]->hb);
+#if (NGX_THREADS)
+    mc->tp = ngx_thread_pool_get(cycle, &(ngx_str_t) ngx_string("default"));
+#endif
+    return NGX_OK;
 }
 
 static ngx_int_t ngx_http_b_init(ngx_conf_t *cf)
@@ -619,7 +781,12 @@ static ngx_int_t ngx_http_b_init(ngx_conf_t *cf)
     ngx_http_handler_pt *h = ngx_array_push(&cmcf->phases[NGX_HTTP_REWRITE_PHASE].handlers);
     if (h == NULL) return NGX_ERROR;
     *h = ngx_http_b_rewrite_handler;
+#if (NGX_THREADS)
+    if (ngx_thread_pool_add(cf, NULL) == NULL) return NGX_ERROR;
+#endif
     ngx_http_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = ngx_http_b_header_filter;
+    ngx_http_next_body_filter = ngx_http_top_body_filter;
+    ngx_http_top_body_filter = ngx_http_b_body_filter;
     return NGX_OK;
 }

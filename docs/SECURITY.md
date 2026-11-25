@@ -1,7 +1,7 @@
 # Security
 
 ## Model
-mod_ai_agent adds an interface for AI agents to an existing website. Its rule: **an AI interface must never become a back door.**
+mod_http_b adds an interface for AI agents to an existing website. Its rule: **an AI interface must never become a back door.**
 
 1. **Authentication is never bypassed.** Reading, actions and chat run as the client, with the client's own cookies and Authorization header. The site's own code decides what the client may see and do.
 2. **Nothing behind a login leaks.** Only requests without cookies or Authorization are learned. Also excluded from learning: responses with `Cache-Control: private`, and URLs the code scan marks as login-only (stale copies are deleted). Forms and code endpoints known only from login-only areas are never listed. Logged-in results are returned only to that client (`Cache-Control: no-store`). They are never cached, never learned and never sent to the AI.

@@ -1,10 +1,26 @@
+# ngx_http_b_module: nginx side (ngx_http_b_module.c) + shared core (hb_core.c,
+# which includes ../../mod_http_b.c). Needs APR, APR-util, the Apache httpd
+# headers (no running Apache), libcurl and PCRE2.
+#
+# Paths come from apr-1-config, apu-1-config and apxs when available;
+# override with HTTP_B_INCS (space-separated include dirs) and HTTP_B_LIBS.
 ngx_addon_name=ngx_http_b_module
-if test -n "$ngx_module_link"; then
-    ngx_module_type=HTTP_FILTER
-    ngx_module_name=ngx_http_b_module
-    ngx_module_srcs="$ngx_addon_dir/ngx_http_b_module.c"
-    . auto/module
-else
-    HTTP_FILTER_MODULES="$HTTP_FILTER_MODULES ngx_http_b_module"
-    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_b_module.c"
+
+if [ -z "$HTTP_B_INCS" ]; then
+    APXS=$(command -v apxs || command -v apxs2)
+    HTTP_B_INCS="$(apr-1-config --includedir 2>/dev/null) $(apu-1-config --includedir 2>/dev/null) $([ -n "$APXS" ] && $APXS -q INCLUDEDIR 2>/dev/null)"
 fi
+if [ -z "$HTTP_B_LIBS" ]; then
+    HTTP_B_LIBS="$(apr-1-config --link-ld 2>/dev/null || echo -lapr-1) $(apu-1-config --link-ld 2>/dev/null || echo -laprutil-1) -lcurl -lpcre2-8"
+fi
+
+ngx_module_type=HTTP_FILTER
+ngx_module_name=ngx_http_b_module
+ngx_module_incs="$ngx_addon_dir $ngx_addon_dir/../.. $HTTP_B_INCS"
+ngx_module_deps="$ngx_addon_dir/hb_core.h $ngx_addon_dir/../../mod_http_b.c"
+ngx_module_srcs="$ngx_addon_dir/ngx_http_b_module.c $ngx_addon_dir/hb_core.c"
+ngx_module_libs="$HTTP_B_LIBS"
+ngx_module_order="ngx_http_b_module ngx_http_copy_filter_module"
+CFLAGS="$CFLAGS -DLINUX -D_REENTRANT -D_GNU_SOURCE"
+
+. auto/module

@@ -1,4 +1,4 @@
-// AI Chat panel: turns the current site into a conversation (ai-chat/1).
+// AI Chat panel: turns the current site into a conversation (http-b/1).
 // Security: server text is only ever inserted with textContent, never as HTML.
 import { AiChat } from "./chat-core.js";
 
@@ -29,7 +29,7 @@ async function run(fn, youText) {
     render(await fn());
   } catch (e) {
     say(e.notSupported
-      ? "This site doesn't offer an AI chat interface yet. (It needs a web server with the ai-chat protocol, such as Apache with mod_ai_agent.)"
+      ? "This site doesn't offer an AI chat interface yet. (It needs a web server with the http-b protocol, such as Apache with mod_http_b or nginx with ngx_http_b_module.)"
       : "Couldn't reach the site: " + e.message, "error");
   } finally {
     busy(false);

@@ -8,7 +8,7 @@ ROOT = Path(__file__).parent
 SRC, DIST = ROOT / "src", ROOT / "dist"
 VERSION = "0.1.0"
 NAME = "AI Chat for websites"
-DESC = "Talk to websites instead of clicking through them. Uses the open ai-chat protocol: sites tell you where you are, what you can do and where you can go."
+DESC = "Talk to websites instead of clicking through them. Uses the open http-b protocol: sites tell you where you are, what you can do and where you can go."
 ICONS = {s: f"icons/icon-{s}.png" for s in (16, 32, 48, 128)}
 HOSTS = ["http://*/*", "https://*/*"]
 
@@ -70,7 +70,7 @@ def main():
         out = DIST / target
         shutil.copytree(SRC, out)
         (out / "manifest.json").write_text(json.dumps(man, indent=2) + "\n")
-        z = DIST / f"ai-chat-{target}-{VERSION}.zip"
+        z = DIST / f"http-b-{target}-{VERSION}.zip"
         with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(out.rglob("*")):
                 if f.is_file(): zf.write(f, f.relative_to(out))

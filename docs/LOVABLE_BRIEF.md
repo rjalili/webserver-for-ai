@@ -4,7 +4,7 @@ Paste this whole file into Lovable as the project prompt. Upload `README.md`, `d
 
 This brief is part of the single project archive. Everything Lovable needs is in it: this file, plus the Markdown docs to render (README.md, docs/PROTOCOL.md, docs/CHANGELOG.md, docs/SECURITY.md, extension/README.md).
 
-Placeholders to replace before publishing: `{PRODUCT_NAME}` (working name: **Webserver For AI**; module name `mod_ai_agent`), `{DOMAIN}`, `{GITHUB_URL}`, `{CONTACT_EMAIL}`, `{VERSION}` (currently 1.4.0).
+Placeholders to replace before publishing: `{PRODUCT_NAME}` (working name: **Webserver For AI**; module name `mod_http_b`), `{DOMAIN}`, `{GITHUB_URL}`, `{CONTACT_EMAIL}`, `{VERSION}` (currently 1.4.0).
 
 ---
 
@@ -16,7 +16,7 @@ The site must:
 1. Explain the idea in 10 seconds to site owners, developers and browser/AI people.
 2. Let developers install the module in minutes (copy-paste commands, a download link to GitHub releases).
 3. Host the documentation: README, protocol specification and changelog, rendered from Markdown.
-4. Present the **ai-chat/1 protocol** as an open proposal and invite implementers (other web servers, browser plugins, AI agents).
+4. Present the **http-b/1 protocol** as an open proposal and invite implementers (other web servers, browser plugins, AI agents).
 5. Collect interest: a waitlist for the browser plugin and a newsletter.
 
 ## 2. Audiences, in priority order
@@ -71,7 +71,7 @@ The site must:
 2. **How it works** (`/how-it-works`): a longer explanation of the five layers with diagrams, the learning gate ("I don't know this site well enough yet"), and login detection.
 3. **Install** (`/install`): tabs for Ubuntu/Debian, RHEL/Fedora and Docker (coming soon). Copy buttons on every command. A minimal configuration block and a "verify it works" section with curl commands. Commands are in section 9.
 4. **Docs** (`/docs`): README.md rendered with an auto-generated sidebar table of contents.
-5. **Protocol** (`/protocol`): docs/PROTOCOL.md rendered. A banner: "ai-chat/1: an open proposal. Implement it, comment on it."
+5. **Protocol** (`/protocol`): docs/PROTOCOL.md rendered. A banner: "http-b/1: an open proposal. Implement it, comment on it."
 6. **Browser extension** (`/extension`): "Browse by talking". A screenshot-style mock-up of the side panel beside a shop page, showing generated forms, a "Please confirm" card and a dashed "Sponsored" box (the panel design is in extension/src/panel.css: reuse its colours).
    - Store buttons: Chrome Web Store, Firefox Add-ons, Edge, Opera, and the App Store for Safari. Point them at `{GITHUB_URL}/releases` until store listings exist.
    - Render extension/README.md below the buttons.
@@ -81,7 +81,7 @@ The site must:
 9. **Changelog** (`/changelog`): docs/CHANGELOG.md rendered.
 10. **Security** (`/security`): docs/SECURITY.md rendered.
 11. **Community** (`/community`): GitHub link, how to contribute, "implement the protocol" invitation, contact.
-10. Footer on every page: GitHub, licence, contact, "This site speaks ai-chat" badge (once hosted on Apache with the module).
+10. Footer on every page: GitHub, licence, contact, "This site speaks http-b" badge (once hosted on Apache with the module).
 
 ## 5. Design direction
 
@@ -136,7 +136,7 @@ Keep the tone neutral and factual.
 | Readable pages for agents | ✔ | ✔ | — | — |
 | Q&A in English | ✔ | — | ✔ | — |
 | Do actions (forms, login, checkout) | ✔ server-side | — | — | ✔ in the browser |
-| Conversation on any URL | ✔ ai-chat/1 | — | — | — |
+| Conversation on any URL | ✔ http-b/1 | — | — | — |
 | Usable from Claude / ChatGPT (MCP) | ✔ built in | — | ✔ | — |
 | Browser extension | ✔ all major browsers | — | — | native (Chrome preview) |
 | Ads relayed and labelled | ✔ | — | — | — |
@@ -150,7 +150,7 @@ Add one line under the table: "We plan to publish our action catalog as WebMCP t
 ```bash
 # Ubuntu / Debian
 sudo apt install apache2-dev libcurl4-openssl-dev
-tar xzf mod_ai_agent-{VERSION}.tar.gz && cd mod_ai_agent
+tar xzf mod_http_b-{VERSION}.tar.gz && cd mod_http_b
 make && sudo make enable-debian
 
 # RHEL / Fedora
@@ -165,7 +165,7 @@ AIAgentSiteName        "Your Company"
 AIAgentSiteDescription "One paragraph about what your site offers."
 # Optional: answers from your own AI provider, after it has learned your site
 AIAgentAIService anthropic
-AIAgentAIKey     file:/etc/apache2/ai_agent.key
+AIAgentAIKey     file:/etc/apache2/http_b.key
 ```
 
 Verify:
@@ -181,7 +181,7 @@ curl https://your-site/.well-known/ai/actions
 - React + TypeScript + Tailwind (Lovable defaults are fine).
 - Docs pages render the uploaded Markdown files at build time or from `/content/*.md`, with heading anchors, a table of contents and copy buttons on code.
 - Download buttons link to `{GITHUB_URL}/releases/latest`. Don't host binaries on the site.
-- Extension downloads: link to the release assets `ai-chat-chromium-*.zip`, `ai-chat-firefox-*.zip` and the store listings when they exist.
+- Extension downloads: link to the release assets `http-b-chromium-*.zip`, `http-b-firefox-*.zip` and the store listings when they exist.
 - Waitlist and newsletter forms: store in Supabase (Lovable's built-in backend). Fields: email, role (site owner / developer / AI or browser builder), optional website URL. Double opt-in email and GDPR consent text (the owner is EU-based). No tracking without consent.
 - SEO: per-page titles and descriptions, an Open Graph image, sitemap.xml and robots.txt.
 - **Dogfooding:** serve `/llms.txt` and `.md` versions of the docs pages. When the site is later hosted behind Apache with the module, it will speak ai-chat natively.
@@ -193,4 +193,4 @@ curl https://your-site/.well-known/ai/actions
 - **Plugin page headline:** "Browse by talking."
 - **Plugin page body:** "Every site running {PRODUCT_NAME} can become a conversation. Our browser plugin will let you switch any page between the normal view, a chat, or both side by side, with your own logins and your own choices."
 - **Security page intro:** "An AI interface must never become a back door. Here is exactly how {PRODUCT_NAME} keeps private things private."
-- **Call to action for implementers:** "ai-chat/1 is open. Build a client, a server or a browser feature — and tell us."
+- **Call to action for implementers:** "http-b/1 is open. Build a client, a server or a browser feature — and tell us."

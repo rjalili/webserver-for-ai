@@ -1,4 +1,4 @@
-// ai-chat/1 protocol client: shared by the browser extension and the Node tests.
+// http-b/1 protocol client: shared by the browser extension and the Node tests.
 // No browser APIs here: give it a fetch function (the browser's, or one with a cookie jar).
 
 export const CHAT_TYPE = "application/vnd.ai-chat+json";

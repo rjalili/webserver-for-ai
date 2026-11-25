@@ -1,5 +1,5 @@
 #!/bin/sh
-# Teach mod_ai_agent a site in one pass instead of waiting for visitor traffic.
+# Teach mod_http_b a site in one pass instead of waiting for visitor traffic.
 # Fetches every page in the sitemap (and pages they link to) anonymously, which
 # the module learns from exactly as it learns from real visitors.
 # Usage: tools/prime.sh https://www.example.com [max_pages]
@@ -10,7 +10,7 @@ import json, sys, urllib.request, urllib.parse
 site, maxp = sys.argv[1].rstrip('/'), int(sys.argv[2])
 def get(path, guide=False):
     url = site + path + (('&' if '?' in path else '?') + 'ai=guide' if guide else '')
-    req = urllib.request.Request(url, headers={'User-Agent': 'mod_ai_agent-prime/1.0'})
+    req = urllib.request.Request(url, headers={'User-Agent': 'mod_http_b-prime/1.0'})
     with urllib.request.urlopen(req, timeout=30) as r: return r.read()
 todo = [p['url'] for p in json.loads(get('/.well-known/ai/sitemap.json'))['pages']]
 seen = set()

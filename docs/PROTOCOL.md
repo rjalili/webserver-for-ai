@@ -1,9 +1,9 @@
 # Webserver For AI — Protocol Specification
 
-Version: **ai-chat/1**, implemented by mod_ai_agent 1.5.0.
+Version: **http-b/1**, implemented by mod_http_b and ngx_http_b_module 1.6.0.
 Status: draft, proposed for wider adoption. Media type in use: `application/vnd.ai-chat+json` (vendor tree, unregistered).
 
-This document specifies how an AI agent (or a browser plugin acting for a person) uses a website through a web server that implements this protocol. The protocol has **five layers**. A server may implement any subset; mod_ai_agent implements all five.
+This document specifies how an AI agent (or a browser plugin acting for a person) uses a website through a web server that implements this protocol. The protocol has **five layers**. A server may implement any subset; mod_http_b implements all five.
 
 | Layer | What it gives an agent | Entry point |
 |---|---|---|
@@ -38,7 +38,7 @@ A client that sees `rel="alternate"; type="application/vnd.ai-chat+json"` knows 
 | exact | default, `?ai=exact`, `X-AI-Mode: exact` | Unmodified response; agents also get `X-AI-Agent-Help` |
 | guide | `?ai=guide`, `X-AI-Mode: guide`, `Accept: application/vnd.ai+json` | `application/json` page guide (below) |
 | text | `?ai=text`, `X-AI-Mode: text`, `Accept: text/markdown` | `text/markdown` with an English preface |
-| chat | `?ai=chat`, `Accept: application/vnd.ai-chat+json`, or a POST with that Content-Type | ai-chat/1 turn (section 5) |
+| chat | `?ai=chat`, `Accept: application/vnd.ai-chat+json`, or a POST with that Content-Type | http-b/1 turn (section 5) |
 
 The `ai` query parameter is removed before the application sees the request.
 Guide/text responses send `Vary: Accept, X-AI-Mode`; when chosen by header, also `Cache-Control: private, no-cache`.
@@ -121,7 +121,7 @@ Response (`Cache-Control: no-store`; cookies the site set are sent as `Set-Cooki
 
 Problems (`done: false`, nothing was submitted): `needs_login` (with `login_actions`), `needs_confirmation`, `invalid_fields`, `unknown_action`, `form_not_found`, `read_only`, `busy` (429), `forbidden` (403), `bad_request`, `unreachable` (502).
 
-## 5. Chat — ai-chat/1
+## 5. Chat — http-b/1
 
 The conversational form of everything above. Any URL can be the start.
 
@@ -135,7 +135,7 @@ GET /shop/  Accept: application/vnd.ai-chat+json
 
 ```json
 {
-  "type": "chat", "protocol": "ai-chat/1", "language": "en",
+  "type": "chat", "protocol": "http-b/1", "language": "en",
   "conversation": "12ae832c506473f8bea690f28020afd6", "turn": 1,
   "at": {"url": "/shop/", "title": "Bluewhite shop", "requires_login": false},
   "message": "You are at \"Bluewhite shop\" (/shop/). Here you can \"Search\", \"Add to basket: Whale widget - 29 EUR\" ...",

@@ -1,8 +1,8 @@
-# Mock AI service for testing mod_ai_agent without a real API key.
+# Mock AI service for testing mod_http_b without a real API key.
 # Run: python3 tests/mock_ai.py  (listens on 127.0.0.1:9999)
 # Configure: AIAgentAIService anthropic / AIAgentAIKey sk-test-123 / AIAgentAIEndpoint http://127.0.0.1:9999/v1/messages
 #        or: AIAgentAIService openai / AIAgentAIKey sk-openai-456 / AIAgentAIModel gpt-test / AIAgentAIEndpoint http://127.0.0.1:9999/v1/chat/completions
-# Mock Anthropic + OpenAI APIs for testing mod_ai_agent. Records requests to /tmp/mock_calls.jsonl
+# Mock Anthropic + OpenAI APIs for testing mod_http_b. Records requests to /tmp/mock_calls.jsonl
 import json, sys, http.server
 MODE = {"fail": False}
 class H(http.server.BaseHTTPRequestHandler):

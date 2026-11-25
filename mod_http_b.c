@@ -1,5 +1,5 @@
 /*
- * mod_ai_agent.c -- give any Apache-hosted website an English-speaking
+ * mod_http_b.c -- give any Apache-hosted website an English-speaking
  * interface for AI agents.
  *
  * What it does
@@ -51,9 +51,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-module AP_MODULE_DECLARE_DATA ai_agent_module;
+module AP_MODULE_DECLARE_DATA http_b_module;
 
-#define AI_VERSION      "1.5.0"
+#define AI_VERSION      "1.6.0"
 #define LEARN_OFF 0
 #define LEARN_ALWAYS 1
 #define LEARN_UNTIL_READY 2
@@ -173,7 +173,7 @@ static void *merge_cfg(apr_pool_t *p, void *basev, void *addv)
 
 static ai_cfg *get_cfg(server_rec *s)
 {
-    return ap_get_module_config(s->module_config, &ai_agent_module);
+    return ap_get_module_config(s->module_config, &http_b_module);
 }
 
 /* forward declarations */
@@ -510,7 +510,7 @@ static const command_rec ai_cmds[] = {
     AP_INIT_FLAG("AIAgentLearnQueryStrings", set_flag, OFF(learn_qs), RSRC_CONF,
         "Also learn URLs with query strings, skipping sensitive parameters (default On)"),
     AP_INIT_TAKE1("AIAgentKnowledgeDir", set_str, OFF(kdir), RSRC_CONF,
-        "Directory for the knowledge store (default /var/lib/apache2/ai_agent/<host>)"),
+        "Directory for the knowledge store (default /var/lib/apache2/http_b/<host>)"),
     AP_INIT_FLAG("AIAgentLogQuestions", set_flag, OFF(log_questions), RSRC_CONF,
         "Log agents' questions to questions.log in the knowledge directory (default On)"),
     AP_INIT_TAKE1("AIAgentLearning", set_learning, NULL, RSRC_CONF,
@@ -2200,7 +2200,7 @@ static int do_welcome(request_rec *r, ai_cfg *c)
     }
     jkey(&b, "you_were_detected_as_an_ai_agent"); sb_puts(&b, agent ? "true" : "false"); sb_putc(&b, ',');
     jstr(&b, "default_mode_for_ai_agents", mode_name(cfg_mode(c))); sb_putc(&b, ',');
-    jstr(&b, "generator", "mod_ai_agent/" AI_VERSION);
+    jstr(&b, "generator", "mod_http_b/" AI_VERSION);
     sb_puts(&b, "}\n");
     return send_body(r, "application/json; charset=utf-8", &b, "max-age=300");
 }
@@ -2246,7 +2246,7 @@ static int do_sitemap(request_rec *r, ai_cfg *c)
         sb_putc(&b, '}');
     }
     sb_puts(&b, "],");
-    jstr(&b, "generator", "mod_ai_agent/" AI_VERSION);
+    jstr(&b, "generator", "mod_http_b/" AI_VERSION);
     sb_puts(&b, "}\n");
     return send_body(r, "application/json; charset=utf-8", &b, "max-age=300");
 }
@@ -4067,7 +4067,7 @@ static void write_access_report(request_rec *r, ai_cfg *c, apr_array_header_t *m
     if (!c->kdir_resolved) return;
     for (i = 0; i < map->nelts; i++) if (APR_ARRAY_IDX(map, i, access_t).status == AC_PROTECTED) prot++;
     sb_init(&b, r->pool, 4096);
-    sb_printf(&b, "# mod_ai_agent access map for %s, generated %s\n# %d code files read; %d URLs or URL patterns found, %d require login.\n"
+    sb_printf(&b, "# mod_http_b access map for %s, generated %s\n# %d code files read; %d URLs or URL patterns found, %d require login.\n"
               "# Format: STATUS  URL  [source] evidence.   '/x/*' = everything under /x.  (browser) = guard runs in the browser.\n\n",
               site_name(r, c), iso_time(r->pool, apr_time_now()), nfiles, map->nelts, prot);
     for (i = 0; i < map->nelts; i++) {
@@ -4116,7 +4116,7 @@ static apr_array_header_t *access_map(request_rec *r, ai_cfg *c)
     sc->scanned_at = apr_time_now();
     sc->scanning = 0;
     CACHE_UNLOCK();
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_ai_agent: code scan read %d files and mapped %d URLs", nfiles, map->nelts);
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_http_b: code scan read %d files and mapped %d URLs", nfiles, map->nelts);
     write_access_report(r, c, map, nfiles);
     return map;
 }
@@ -4235,7 +4235,7 @@ static void learn_store(request_rec *r, ai_cfg *c, const char *buf, apr_size_t l
     write_atomic(r->pool, kpath(r, c, "pages"), apr_pstrcat(r->pool, apr_pstrndup(r->pool, path, strlen(path) - 5), ".html", NULL),
                  buf, len > 1024 * 1024 ? 1024 * 1024 : len);
     if (write_atomic(r->pool, kpath(r, c, "pages"), path, b.s, b.len))
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_ai_agent: learned %s", uri);
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_http_b: learned %s", uri);
 }
 
 typedef struct { sb_t buf; int full; } learn_ctx;
@@ -4252,7 +4252,7 @@ static apr_status_t ai_learn_filter(ap_filter_t *f, apr_bucket_brigade *bb)
             const char *path = learn_path(r, c, public_uri(r));
             apr_file_remove(apr_pstrcat(r->pool, apr_pstrndup(r->pool, path, strlen(path) - 5), ".html", NULL), r->pool);
             if (file_mtime(r->pool, path) && apr_file_remove(path, r->pool) == APR_SUCCESS)
-                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_ai_agent: forgot %s (HTTP %d)", public_uri(r), r->status);
+                ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_http_b: forgot %s (HTTP %d)", public_uri(r), r->status);
         }
         if (r->status != HTTP_OK || !ct || !ap_strcasestr(ct, "html") ||
             !strcmp(apr_table_get(r->notes, "ai-learn") ? apr_table_get(r->notes, "ai-learn") : "1", "2")) {
@@ -4592,7 +4592,7 @@ static const char *llm_call(request_rec *r, ai_cfg *c, const char *system, const
     curl_easy_setopt(h, CURLOPT_TIMEOUT, (long)CFG_ON(c->llm_timeout, 30));
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(h, CURLOPT_USERAGENT, "mod_ai_agent/" AI_VERSION);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "mod_http_b/" AI_VERSION);
     rc = curl_easy_perform(h);
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(hd);
@@ -4939,7 +4939,7 @@ static int act_init(act_ctx *ac, request_rec *r, ai_cfg *c)
                              apr_psprintf(r->pool, "%s\tFALSE\t/\tFALSE\t0\t%s\t%s", ac->host, nm, eq + 1));
         }
     }
-    ac->common = curl_slist_append(NULL, apr_psprintf(r->pool, "User-Agent: %s (acting through mod_ai_agent)",
+    ac->common = curl_slist_append(NULL, apr_psprintf(r->pool, "User-Agent: %s (acting through mod_http_b)",
                                                        ua ? one_line(r->pool, ua) : "AI agent"));
     ac->common = curl_slist_append(ac->common, "Accept: text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
     ac->common = curl_slist_append(ac->common, apr_pstrcat(r->pool, "Accept-Language: ", lang ? lang : "en", NULL));
@@ -4984,7 +4984,7 @@ static int act_request(act_ctx *ac, const char *method, const char *path, const 
     ac->requests++;
     curl_slist_free_all(hd);
     if (rc != CURLE_OK) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, ac->r, "mod_ai_agent: act request %s %s failed: %s",
+        ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, ac->r, "mod_http_b: act request %s %s failed: %s",
                       method, path, curl_easy_strerror(rc));
         return 0;
     }
@@ -6227,7 +6227,7 @@ static int do_ask(request_rec *r, ai_cfg *c)
                 answer = llm_call(r, c, ai_system_prompt(r, c),
                                   ai_context(r, c, pages, ctx_hits, history, q), &err);
                 if (!answer) {
-                    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "mod_ai_agent: AI service call failed: %s", err);
+                    ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "mod_http_b: AI service call failed: %s", err);
                     note = "This site's AI assistant could not be reached, so this is a basic search result instead.";
                 } else if (cf) {
                     write_atomic(r->pool, kpath(r, c, "cache"), cf, answer, strlen(answer));
@@ -6310,7 +6310,7 @@ static int do_page(request_rec *r, ai_cfg *c)
 /* Chat: any URL as a conversation (Accept: application/vnd.ai-chat+json) */
 /* ------------------------------------------------------------------ */
 /*
- * Protocol "ai-chat/1". Every server turn is one JSON object:
+ * Protocol "http-b/1". Every server turn is one JSON object:
  *   message       English: what happened / where you are / what you can do
  *   at            where the conversation is now (url, title, requires_login)
  *   content       the readable text of the current page
@@ -6501,7 +6501,7 @@ static void chat_core(request_rec *r, ai_cfg *c, jv *req, const char *start_at, 
     sb_init(&msg, r->pool, 1024);
     sb_putc(&b, '{');
     jstr(&b, "type", "chat"); sb_putc(&b, ',');
-    jstr(&b, "protocol", "ai-chat/1"); sb_putc(&b, ',');
+    jstr(&b, "protocol", "http-b/1"); sb_putc(&b, ',');
     jstr(&b, "language", "en"); sb_putc(&b, ',');
     jstr(&b, "conversation", conv); sb_putc(&b, ',');
     jkey(&b, "turn"); sb_printf(&b, "%d,", st.turn);
@@ -6922,7 +6922,7 @@ static int do_mcp(request_rec *r, ai_cfg *c)
         jstr(&b, "protocolVersion", ver); sb_putc(&b, ',');
         sb_puts(&b, "\"capabilities\":{\"tools\":{\"listChanged\":false}},");
         sb_puts(&b, "\"serverInfo\":{");
-        jstr(&b, "name", apr_psprintf(r->pool, "%s (mod_ai_agent)", site_name(r, c))); sb_putc(&b, ',');
+        jstr(&b, "name", apr_psprintf(r->pool, "%s (mod_http_b)", site_name(r, c))); sb_putc(&b, ',');
         jstr(&b, "version", AI_VERSION);
         sb_puts(&b, "},");
         jstr(&b, "instructions", apr_psprintf(r->pool,
@@ -7209,7 +7209,7 @@ static sb_t *build_output(request_rec *r, ai_cfg *c, guide_ctx *g, const char **
         sb_json(b, apr_psprintf(r->pool, "Ask the site a question: GET %s/ask?q=...", pre)); sb_putc(b, ',');
         sb_json(b, apr_psprintf(r->pool, "List every page: GET %s/sitemap.json", pre));
         sb_puts(b, "],");
-        jstr(b, "generator", "mod_ai_agent/" AI_VERSION);
+        jstr(b, "generator", "mod_http_b/" AI_VERSION);
         sb_puts(b, "}\n");
     }
     return b;
@@ -7319,9 +7319,9 @@ static const char *default_kdir(apr_pool_t *p, server_rec *s)
     const char *base;
     char *host = apr_pstrdup(p, s->server_hostname ? s->server_hostname : "default"), *h;
     for (h = host; *h; h++) if (!apr_isalnum(*h) && *h != '.' && *h != '-') *h = '_';
-    if (apr_stat(&fi, "/var/lib/apache2", APR_FINFO_TYPE, p) == APR_SUCCESS) base = "/var/lib/apache2/ai_agent";
-    else if (apr_stat(&fi, "/var/lib/httpd", APR_FINFO_TYPE, p) == APR_SUCCESS) base = "/var/lib/httpd/ai_agent";
-    else base = ap_server_root_relative(p, "ai_agent");
+    if (apr_stat(&fi, "/var/lib/apache2", APR_FINFO_TYPE, p) == APR_SUCCESS) base = "/var/lib/apache2/http_b";
+    else if (apr_stat(&fi, "/var/lib/httpd", APR_FINFO_TYPE, p) == APR_SUCCESS) base = "/var/lib/httpd/http_b";
+    else base = ap_server_root_relative(p, "http_b");
     return apr_pstrcat(p, base, "/", host, NULL);
 }
 
@@ -7336,7 +7336,7 @@ static apr_table_t *loaded_ads_files(apr_pool_t *p)
 static void give_to_worker(apr_pool_t *p, const char *path)
 {
     if (geteuid() == 0 && chown(path, ap_unixd_config.user_id, ap_unixd_config.group_id) != 0)
-        ap_log_perror(APLOG_MARK, APLOG_WARNING, errno, p, "mod_ai_agent: cannot chown %s", path);
+        ap_log_perror(APLOG_MARK, APLOG_WARNING, errno, p, "mod_http_b: cannot chown %s", path);
 }
 
 static int ai_post_config(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
@@ -7363,7 +7363,7 @@ static int ai_post_config(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp
             else if (c->llm_provider != LLM_ANTHROPIC && !c->llm_model) problem = "AIAgentAIModel is required";
             else if (c->llm_provider == LLM_COMPATIBLE && !c->llm_endpoint) problem = "AIAgentAIEndpoint is required for 'compatible'";
             if (problem) {
-                ap_log_error(APLOG_MARK, APLOG_CRIT, 0, sv, "mod_ai_agent (%s): %s",
+                ap_log_error(APLOG_MARK, APLOG_CRIT, 0, sv, "mod_http_b (%s): %s",
                              sv->server_hostname ? sv->server_hostname : "main server", problem);
                 return HTTP_INTERNAL_SERVER_ERROR;
             }
@@ -7375,7 +7375,7 @@ static int ai_post_config(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp
             jv *list = txt ? jparse(pconf, &cur, 0) : NULL;
             apr_table_setn(loaded_ads_files(pconf), apr_psprintf(pconf, "%p", (void *)c), "1");
             if (!list || list->t != JV_ARR) {
-                ap_log_error(APLOG_MARK, APLOG_CRIT, 0, sv, "mod_ai_agent: AIAgentAdsFile %s is not a JSON array", c->ads_file);
+                ap_log_error(APLOG_MARK, APLOG_CRIT, 0, sv, "mod_http_b: AIAgentAdsFile %s is not a JSON array", c->ads_file);
                 return HTTP_INTERNAL_SERVER_ERROR;
             }
             for (i = 0; i < list->items->nelts; i++) {
@@ -7409,7 +7409,7 @@ static int ai_post_config(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp
         for (i = 0; sub[i]; i++) {
             const char *d = apr_pstrcat(ptemp, dir, "/", sub[i], NULL);
             if (apr_dir_make_recursive(d, APR_FPROT_UREAD | APR_FPROT_UWRITE | APR_FPROT_UEXECUTE | APR_FPROT_GREAD | APR_FPROT_GEXECUTE, ptemp) != APR_SUCCESS) {
-                ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv, "mod_ai_agent: cannot create %s; learning is disabled", d);
+                ap_log_error(APLOG_MARK, APLOG_ERR, 0, sv, "mod_http_b: cannot create %s; learning is disabled", d);
                 c->kdir_resolved = NULL;
                 break;
             }
@@ -7456,7 +7456,7 @@ static void ai_register_hooks(apr_pool_t *p)
     ap_register_output_filter("AI_AGENT_GUIDE", ai_guide_filter, NULL, AP_FTYPE_CONTENT_SET - 1);
 }
 
-AP_DECLARE_MODULE(ai_agent) = {
+AP_DECLARE_MODULE(http_b) = {
     STANDARD20_MODULE_STUFF,
     NULL,           /* per-directory config creator */
     NULL,           /* dir config merger */

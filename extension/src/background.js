@@ -20,7 +20,7 @@ function showBadge(tabId) {
   api.action.setTitle({ tabId, title: ok ? "Chat with this site" : "AI Chat (this site has no chat interface yet)" });
 }
 
-// Discovery: every page served with mod_ai_agent says Link: <...>; rel="alternate"; type="application/vnd.ai-chat+json"
+// Discovery: every page served with mod_http_b says Link: <...>; rel="alternate"; type="application/vnd.ai-chat+json"
 if (api.webRequest?.onHeadersReceived) {
   api.webRequest.onHeadersReceived.addListener((d) => {
     if (d.tabId < 0) return;

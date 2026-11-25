@@ -1,6 +1,6 @@
 # Webserver For AI: Handoff and Maintenance Guide
 
-For whoever takes over maintenance and the next generation of **mod_ai_agent**: a developer, a team, or an AI coding agent (Claude Code, Cursor, …).
+For whoever takes over maintenance and the next generation of **mod_http_b**: a developer, a team, or an AI coding agent (Claude Code, Cursor, …).
 
 > **Important for Lovable users.** Lovable builds web apps (React/TypeScript). It is the right tool for the **distribution website** (see `LOVABLE_BRIEF.md`). It cannot compile, test or maintain this module, which is ~6,800 lines of C running inside Apache httpd. Maintenance needs a C developer, or an AI coding agent with a Linux shell (for example Claude Code), using the instructions below.
 
@@ -16,7 +16,7 @@ An open-source Apache httpd module that gives any website an interface for AI ag
 4. **act**: do everything a person can do by clicking (search, forms, log in, basket, checkout), with the agent's own session;
 5. **be used from Claude, ChatGPT and other assistants** through an MCP server at `/.well-known/ai/mcp`;
 6. **respect advertising**: page ads and configured agent ads are relayed in a clearly labelled `sponsored` block, never mixed into content or AI answers;
-7. **chat**: any URL can become a conversation (`ai-chat/1`). The server tells the agent where it is, what it can do and where it can go; the agent replies with `say`, `do` or `go`.
+7. **chat**: any URL can become a conversation (`http-b/1`). The server tells the agent where it is, what it can do and where it can go; the agent replies with `say`, `do` or `go`.
 
 All of this respects logins and never leaks login-protected content. The module reads the site's PHP and JavaScript code to know which pages need a login.
 
@@ -25,14 +25,19 @@ Vision (from the project owner): servers spend enormous effort making pages beau
 ## 2. Repository layout
 
 ```
-mod_ai_agent/
+mod_http_b/
   START_HERE.md         entry point for everyone (owner, Lovable, maintainers)
-  mod_ai_agent.c        the whole module (one C file, ~7,500 lines)
+  mod_http_b.c          the whole protocol (one C file, ~7,500 lines; Apache and nginx both build it) (one C file, ~7,500 lines)
   Makefile              build (apxs), install, Debian enable, tests
-  ai_agent.conf         every directive, commented
+  http_b.conf           every directive, commented (Apache)
+  nginx/ngx_http_b_module/
+    ngx_http_b_module.c nginx side: directives, phases, filters, thread pool
+    hb_core.c           runs mod_http_b.c on APR (the Apache API it needs)
+    hb_core.h           the boundary between the two
+    README.md           build, directives, differences from Apache
   README.md             user documentation (install, configure, features)
   docs/
-    PROTOCOL.md         the protocol: modes, endpoints, ai-chat/1, security rules
+    PROTOCOL.md         the protocol: modes, endpoints, http-b/1, security rules
     HANDOFF.md          this file
     LOVABLE_BRIEF.md    brief + content for the distribution website
     CHANGELOG.md        version history
@@ -44,7 +49,7 @@ mod_ai_agent/
     README.md           install, store publishing, Safari conversion, permissions
   tools/
     prime.sh            teach the module a site in one pass
-    chat_client.py      reference ai-chat/1 client (what a browser plugin does)
+    chat_client.py      reference http-b/1 client (what a browser plugin does)
   tests/
     smoke.sh            11 HTTP-level checks against a running server
     agent_shop_demo.sh  end-to-end agent walkthrough of the PHP shop fixture
@@ -59,7 +64,7 @@ mod_ai_agent/
 ```sh
 # Debian/Ubuntu (tested on Ubuntu, Apache 2.4.58, both prefork+mod_php and event MPM)
 sudo apt install apache2 apache2-dev libcurl4-openssl-dev
-make                      # apxs -c mod_ai_agent.c -lcurl
+make                      # apxs -c mod_http_b.c -lcurl
 sudo make enable-debian   # installs, a2enmod, reloads
 
 # RHEL/Fedora
@@ -67,6 +72,7 @@ sudo dnf install httpd-devel libcurl-devel && make && sudo make install
 
 # Tests (against a running server)
 tests/smoke.sh http://localhost
+# nginx: see nginx/ngx_http_b_module/README.md; the same tests run against it
 tests/agent_shop_demo.sh http://localhost     # needs tests/fixtures/php-shop served at /shop/ and PHP
 python3 tools/chat_client.py http://localhost /shop/   # interactive chat
 ```
@@ -78,7 +84,7 @@ python3 tools/chat_client.py http://localhost /shop/   # interactive chat
 - **the mock AI server** in `tests/mock_ai.py`: it speaks the Anthropic `/v1/messages` and OpenAI `/v1/chat/completions` formats, records every request to `/tmp/mock_calls.jsonl` and can simulate failures. Point `AIAgentAIEndpoint` at it.
 
 Build with full warnings; the code base is warning-clean:
-`apxs -c -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter -Wc,-Wno-missing-field-initializers -Wc,-Wno-sign-compare mod_ai_agent.c -lcurl`
+`apxs -c -Wc,-Wall -Wc,-Wextra -Wc,-Wno-unused-parameter -Wc,-Wno-missing-field-initializers -Wc,-Wno-sign-compare mod_http_b.c -lcurl`
 
 ## 4. Architecture
 
@@ -96,7 +102,7 @@ Build with full warnings; the code base is warning-clean:
 | output filter | `AI_AGENT_GUIDE` | Buffer the HTML and rewrite it as an English guide or Markdown |
 | output filter | `AI_AGENT_LEARN` | Copy public responses into the knowledge store; forget 404/410 pages |
 
-### Code map (mod_ai_agent.c, top to bottom)
+### Code map (mod_http_b.c, top to bottom)
 
 | Section | What's there |
 |---|---|
@@ -132,7 +138,7 @@ Build with full warnings; the code base is warning-clean:
 
 ### Knowledge directory (per site)
 
-Default `/var/lib/apache2/ai_agent/<host>/` (or `/var/lib/httpd/...`), mode 0750, owned by the Apache user:
+Default `/var/lib/apache2/http_b/<host>/` (or `/var/lib/httpd/...`), mode 0750, owned by the Apache user:
 
 | File | Contents |
 |---|---|
@@ -147,7 +153,7 @@ Default `/var/lib/apache2/ai_agent/<host>/` (or `/var/lib/httpd/...`), mode 0750
 
 ## 5. How to extend
 
-**Add a directive.** Add a field to `ai_cfg` and set it to UNSET in `create_cfg`. Add a `MERGE_INT`/`MERGE_STR` line in `merge_cfg` and an `AP_INIT_*` line in `ai_cmds[]`. Read it with `CFG_ON(c->field, default)`. Document it in `ai_agent.conf` and README.md.
+**Add a directive.** Add a field to `ai_cfg` and set it to UNSET in `create_cfg`. Add a `MERGE_INT`/`MERGE_STR` line in `merge_cfg` and an `AP_INIT_*` line in `ai_cmds[]`. Read it with `CFG_ON(c->field, default)`. Document it in `http_b.conf` and README.md.
 
 **Add a language to the code scanner** (Ruby, Python and Java are next):
 1. Recognise the file extension in `scan_walk` and give it a new `kind`.
@@ -222,6 +228,6 @@ Built in one development session (November 2026). Each version was compiled warn
   - Ads were separated from content and kept out of learning and the AI. Decoys (`add-to-cart`, `site-header`) stayed as content. Targeting by path and keyword worked, clicks redirect only to configured URLs, and 150 ad-markup fuzz pages caused no crashes.
   - MCP was tested with the official SDK: login carried over between calls, the confirmation gate held, a second session was isolated, and no cookies reached the client. It also works on a site with no configuration at all.
   - The extension was tested by loading it into real Chrome and running a full shopping flow, with screenshots reviewed. Firefox `web-ext lint` reports 0 errors and 0 warnings.
-- **1.4** ai-chat/1 on every URL. A full shop purchase was done purely by conversation, including a session-backed `say` answered by the AI. Browser-extension origins work; other origins get 403. Fixed a memory-lifetime bug in the cached catalog.
+- **1.4** http-b/1 on every URL. A full shop purchase was done purely by conversation, including a session-backed `say` answered by the AI. Browser-extension origins work; other origins get 403. Fixed a memory-lifetime bug in the cached catalog.
 
 The mock AI server (`tests/mock_ai.py`): a Python `http.server` with POST handlers. `/v1/messages` checks `x-api-key` and `anthropic-version`, then returns `{"content":[{"type":"text","text":...}]}`. `/v1/chat/completions` checks `Authorization: Bearer` and returns `{"choices":[{"message":{"content":...}}]}`. `/control/fail` toggles 529 errors. Every request is appended to a JSONL file so tests can check what context the module sent.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.0 — 2026-11-25
+- **nginx support.** `nginx/ngx_http_b_module` brings every feature to nginx: modes, discovery, sitemap and `llms.txt`, ask (keyword and AI), learning, the code scanner and access map, actions and `/act`, chat on any URL, MCP, sponsored answers. It compiles `mod_http_b.c` itself through a small Apache-API layer on APR, so both servers share one implementation. Endpoints run in nginx's thread pool; requests the module makes to its own server carry the agent's address, which nginx applies like the realip module. Every Apache directive `AIAgentXyz` is the nginx directive `http_b_xyz`. All repository tests pass on nginx 1.26.2 (smoke, shop walkthrough, chat, MCP, extension core).
+- **New names.** The protocol is now **http-b/1** (was ai-chat/1) and the Apache module is **mod_http_b** (`mod_http_b.c`, `http_b_module`, `http_b.conf`; was mod_ai_agent). Directive names, endpoints, headers and media types are unchanged. Extension packages are now `http-b-<browser>-<version>.zip`.
+
 ## 1.5.0 — 2026-11-19
 - **Advertising, respected and delineated.** Ads on pages (ad containers, `rel="sponsored"` links) are taken out of the content and relayed in a separate `sponsored` block, never learned and never given to the AI. Site owners can add agent ads (`AIAgentAd`, `AIAgentAdsFile`), targeted by path or keyword, with weighted rotation, `AIAgentAdsRequired` / `AIAgentAdsTerms`, impression and click logging (`ads.log`), and a click redirect limited to configured destinations. The AI is instructed never to put ads in answers.
 - **MCP server** at `/.well-known/ai/mcp`, so Claude, ChatGPT and other assistants can use any site as a connector. Tools: `site_overview`, `open_page`, `ask`, `list_actions`, `do_action`. A server-side cookie jar per `Mcp-Session-Id` keeps logins working across calls. Tested with the official MCP Python SDK.

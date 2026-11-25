@@ -1,5 +1,5 @@
 #!/bin/sh
-# Smoke test for mod_ai_agent. Usage: tests/smoke.sh [http://host:port]
+# Smoke test for mod_http_b. Usage: tests/smoke.sh [http://host:port]
 # Requires curl and python3.
 H=${1:-http://localhost}
 pass=0; fail=0

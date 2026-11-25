@@ -2,22 +2,22 @@ APXS ?= $(shell command -v apxs || command -v apxs2)
 
 .PHONY: all install enable-debian clean test
 
-all: .libs/mod_ai_agent.so
+all: .libs/mod_http_b.so
 
-.libs/mod_ai_agent.so: mod_ai_agent.c
-	$(APXS) -c -Wc,-Wall mod_ai_agent.c -lcurl
+.libs/mod_http_b.so: mod_http_b.c
+	$(APXS) -c -Wc,-Wall mod_http_b.c -lcurl
 
 # Copies the module into Apache's module directory and adds a LoadModule line
 # (on RHEL/Fedora/macOS/source builds).
 install: all
-	$(APXS) -i -a -n ai_agent .libs/mod_ai_agent.so
+	$(APXS) -i -a -n http_b .libs/mod_http_b.so
 
 # Debian/Ubuntu: install, register with a2enmod and reload.
 enable-debian: all
-	$(APXS) -i -n ai_agent .libs/mod_ai_agent.so
-	echo "LoadModule ai_agent_module /usr/lib/apache2/modules/mod_ai_agent.so" > /etc/apache2/mods-available/ai_agent.load
-	cp ai_agent.conf /etc/apache2/mods-available/ai_agent.conf
-	a2enmod ai_agent
+	$(APXS) -i -n http_b .libs/mod_http_b.so
+	echo "LoadModule http_b_module /usr/lib/apache2/modules/mod_http_b.so" > /etc/apache2/mods-available/http_b.load
+	cp http_b.conf /etc/apache2/mods-available/http_b.conf
+	a2enmod http_b
 	apache2ctl configtest && systemctl reload apache2
 
 test:
